@@ -86,8 +86,7 @@ class DatabricksInputsRepository(InputsRepository):
             as_of_ts,
             last_trip_ts,
             days_since_last_trip,
-            config_version,
-            canonical_version
+            config_version
         FROM {table_name}
         WHERE tenant_id = ?
         ORDER BY subject_id, as_of_ts DESC
@@ -130,7 +129,8 @@ class DatabricksInputsRepository(InputsRepository):
                     days_since_last_trip = self._compute_days_since_last_trip(last_trip_ts, as_of_ts)
 
                 config_version = str(row.get("config_version", ""))
-                canonical_version = str(row.get("canonical_version", ""))
+                # canonical_version not in source table, use config_version as fallback
+                canonical_version = config_version
                 subject_type = str(row.get("subject_type", "shopper"))
 
                 input_obj = OperationalRiskInput.new(

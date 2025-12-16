@@ -72,7 +72,8 @@ The Databricks adapters expect the following tables:
 
 **Input Table:**
 - `{prefix}gold_canonical_shopper_recency_input_v1`
-  - Columns: `tenant_id`, `subject_type`, `subject_id`, `as_of_ts`, `last_trip_ts`, `days_since_last_trip`, `config_version`, `canonical_version`
+  - Columns: `tenant_id`, `subject_type`, `subject_id`, `as_of_ts`, `last_trip_ts`, `days_since_last_trip`, `config_version`
+  - Note: `canonical_version` is derived from `config_version` if not present in the table
 
 **Output Tables:**
 - `{prefix}gold_decision_output_operational_risk_v1`

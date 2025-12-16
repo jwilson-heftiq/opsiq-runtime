@@ -139,6 +139,27 @@ class DatabricksSqlClient:
 
         self._retry_on_error(_execute_stmt)
 
+    def describe_table(self, table_name: str) -> list[dict[str, Any]]:
+        """
+        Describe a table and return column information.
+
+        Args:
+            table_name: Fully qualified table name
+
+        Returns:
+            List of dictionaries with column information (col_name, data_type, comment, etc.)
+        """
+        # Use DESCRIBE TABLE (without EXTENDED) to get just column information
+        sql = f"DESCRIBE TABLE {table_name}"
+        logger.debug(f"Describing table: {table_name}", extra=self._get_log_extra())
+
+        try:
+            return self.query(sql)
+        except Exception as e:
+            # Table might not exist
+            logger.debug(f"Error describing table {table_name}: {e}", extra=self._get_log_extra())
+            raise
+
     def close(self) -> None:
         """Close the connection."""
         if self._connection:

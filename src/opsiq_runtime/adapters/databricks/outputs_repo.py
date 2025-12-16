@@ -5,7 +5,10 @@ import logging
 from datetime import datetime
 from typing import Iterable, Optional
 
+from pathlib import Path
+
 from opsiq_runtime.adapters.databricks.client import DatabricksSqlClient
+from opsiq_runtime.application.errors import ProvisioningError
 from opsiq_runtime.application.run_context import RunContext
 from opsiq_runtime.domain.common.decision import DecisionResult
 from opsiq_runtime.domain.common.evidence import Evidence, EvidenceSet
@@ -22,6 +25,41 @@ BATCH_SIZE = 1000
 class DatabricksOutputsRepository(OutputsRepository):
     """Outputs repository that writes to Databricks tables."""
 
+    # Expected columns for each table
+    DECISION_TABLE_COLUMNS = {
+        "tenant_id",
+        "subject_type",
+        "subject_id",
+        "primitive_name",
+        "primitive_version",
+        "canonical_version",
+        "config_version",
+        "as_of_ts",
+        "decision_state",
+        "confidence",
+        "drivers_json",
+        "metrics_json",
+        "evidence_refs_json",
+        "computed_at",
+        "valid_until",
+        "correlation_id",
+    }
+
+    EVIDENCE_TABLE_COLUMNS = {
+        "tenant_id",
+        "subject_type",
+        "subject_id",
+        "primitive_name",
+        "primitive_version",
+        "canonical_version",
+        "config_version",
+        "as_of_ts",
+        "evidence_id",
+        "evidence_json",
+        "computed_at",
+        "correlation_id",
+    }
+
     def __init__(
         self,
         client: DatabricksSqlClient,
@@ -34,6 +72,7 @@ class DatabricksOutputsRepository(OutputsRepository):
         prefix = self.settings.databricks_table_prefix
         self.decision_table_name = decision_table_name or f"{prefix}gold_decision_output_operational_risk_v1"
         self.evidence_table_name = evidence_table_name or f"{prefix}gold_decision_evidence_operational_risk_v1"
+        self._validated_tables: set[str] = set()  # Cache validated table names
 
     def _build_table_name(self, table_name: str) -> str:
         """Build fully qualified table name with catalog and schema if specified."""
@@ -44,6 +83,88 @@ class DatabricksOutputsRepository(OutputsRepository):
             parts.append(self.settings.databricks_schema)
         parts.append(table_name)
         return ".".join(parts)
+
+    def _get_ddl_file_path(self, table_type: str) -> str:
+        """Get the path to the DDL file for a table type."""
+        base_path = Path(__file__).parent / "ddl"
+        if table_type == "decision":
+            return str(base_path / "decision_output.sql")
+        elif table_type == "evidence":
+            return str(base_path / "evidence.sql")
+        else:
+            return str(base_path / f"{table_type}.sql")
+
+    def _get_suggested_command(self, table_name: str, ddl_file: str) -> str:
+        """Generate a suggested Databricks command to create the table."""
+        catalog_schema = ""
+        if self.settings.databricks_catalog:
+            catalog_schema = f"{self.settings.databricks_catalog}."
+            if self.settings.databricks_schema:
+                catalog_schema += f"{self.settings.databricks_schema}."
+        return f"Run the DDL from {ddl_file} in Databricks SQL, or use: databricks sql execute --file {ddl_file} --warehouse-id <your-warehouse-id>"
+
+    def _validate_table(self, table_name: str, expected_columns: set[str], table_type: str) -> None:
+        """
+        Validate that a table exists and has all required columns.
+
+        Args:
+            table_name: Fully qualified table name
+            expected_columns: Set of required column names
+            table_type: Type of table ('decision' or 'evidence') for error messages
+
+        Raises:
+            ProvisioningError: If table is missing or columns are missing
+        """
+        # Skip if already validated
+        if table_name in self._validated_tables:
+            return
+
+        try:
+            # Try to describe the table
+            description = self.client.describe_table(table_name)
+        except Exception as e:
+            # Table doesn't exist or can't be accessed
+            ddl_file = self._get_ddl_file_path(table_type)
+            suggested_command = self._get_suggested_command(table_name, ddl_file)
+            raise ProvisioningError(
+                f"Table {table_name} does not exist or cannot be accessed: {e}",
+                table_names=[table_name],
+                ddl_file_path=ddl_file,
+                suggested_command=suggested_command,
+            ) from e
+
+        # Extract column names from DESCRIBE output
+        # DESCRIBE TABLE returns rows with col_name, data_type, comment, etc.
+        # The output format can vary, but typically has 'col_name' as the first column
+        actual_columns = set()
+        for row in description:
+            # Try different possible column name keys
+            col_name = (
+                row.get("col_name")
+                or row.get("column_name")
+                or (list(row.values())[0] if row else None)  # First value if dict
+            )
+            if col_name:
+                col_name_str = str(col_name).strip()
+                # Skip empty strings, metadata rows starting with #, and table properties
+                if col_name_str and not col_name_str.startswith("#") and "=" not in col_name_str:
+                    actual_columns.add(col_name_str.lower())
+
+        # Check for missing columns
+        missing_columns = expected_columns - actual_columns
+        if missing_columns:
+            ddl_file = self._get_ddl_file_path(table_type)
+            suggested_command = self._get_suggested_command(table_name, ddl_file)
+            raise ProvisioningError(
+                f"Table {table_name} is missing required columns: {', '.join(sorted(missing_columns))}",
+                table_names=[table_name],
+                ddl_file_path=ddl_file,
+                suggested_command=suggested_command,
+            )
+
+        # Table is valid, cache it
+        self._validated_tables.add(table_name)
+        logger.debug(f"Validated table {table_name} has all required columns", extra=self.client._get_log_extra())
 
     def _format_datetime(self, dt: datetime | None) -> str | None:
         """Format datetime to ISO string for SQL."""
@@ -72,6 +193,9 @@ class DatabricksOutputsRepository(OutputsRepository):
 
         table_name = self._build_table_name(self.decision_table_name)
         correlation_id = ctx.correlation_id.value if ctx.correlation_id else None
+
+        # Validate table before writing
+        self._validate_table(table_name, self.DECISION_TABLE_COLUMNS, "decision")
 
         logger.info(
             f"Writing {len(decisions_list)} decisions to {table_name}",
@@ -237,6 +361,9 @@ class DatabricksOutputsRepository(OutputsRepository):
 
         table_name = self._build_table_name(self.evidence_table_name)
         correlation_id = ctx.correlation_id.value if ctx.correlation_id else None
+
+        # Validate table before writing
+        self._validate_table(table_name, self.EVIDENCE_TABLE_COLUMNS, "evidence")
 
         logger.info(
             f"Writing {len(evidence_records)} evidence records to {table_name}",
