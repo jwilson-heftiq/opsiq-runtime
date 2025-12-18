@@ -31,6 +31,7 @@ class FileOutputsRepository(OutputsRepository):
         serializable = [
             {
                 "state": d.state,
+                "confidence": d.confidence,
                 "drivers": d.drivers,
                 "metrics": d.metrics,
                 "evidence_refs": d.evidence_refs,

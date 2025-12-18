@@ -4,7 +4,11 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Tuple
 
-from opsiq_runtime.domain.common.decision import DecisionResult
+from opsiq_runtime.domain.common.decision import (
+    CONFIDENCE_HIGH,
+    CONFIDENCE_LOW,
+    DecisionResult,
+)
 from opsiq_runtime.domain.common.evidence import Evidence, EvidenceSet
 from opsiq_runtime.domain.common.versioning import VersionInfo
 from opsiq_runtime.domain.primitives.operational_risk.config import OperationalRiskConfig
@@ -33,12 +37,14 @@ def evaluate_operational_risk(
 
     if last_trip is None:
         decision_state = rules.UNKNOWN
+        confidence = CONFIDENCE_LOW  # Low confidence when no data
     else:
         computed_days = days_since_last_trip or _compute_days_since(last_trip, as_of)
         days_since_last_trip = computed_days
         decision_state = (
             rules.AT_RISK if computed_days >= config.at_risk_days else rules.NOT_AT_RISK
         )
+        confidence = CONFIDENCE_HIGH  # High confidence when we have data
 
     evidence_id = f"evidence-{input_row.subject_id}"
     evidence = Evidence(
@@ -60,6 +66,7 @@ def evaluate_operational_risk(
     )
     decision = DecisionResult(
         state=decision_state,
+        confidence=confidence,
         drivers=["days_since_last_trip"],
         metrics={"days_since_last_trip": float(days_since_last_trip or -1)},
         evidence_refs=[evidence_id],

@@ -7,9 +7,16 @@ from typing import Dict, List
 from opsiq_runtime.domain.common.versioning import VersionInfo
 
 
+# Confidence levels
+CONFIDENCE_HIGH = "HIGH"
+CONFIDENCE_MEDIUM = "MEDIUM"
+CONFIDENCE_LOW = "LOW"
+
+
 @dataclass(frozen=True)
 class DecisionResult:
     state: str
+    confidence: str  # HIGH | MEDIUM | LOW
     drivers: List[str]
     metrics: Dict[str, float]
     evidence_refs: List[str]
