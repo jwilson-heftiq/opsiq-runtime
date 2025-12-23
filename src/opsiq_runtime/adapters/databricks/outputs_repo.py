@@ -12,7 +12,7 @@ from opsiq_runtime.application.errors import ProvisioningError
 from opsiq_runtime.application.run_context import RunContext
 from opsiq_runtime.domain.common.decision import DecisionResult
 from opsiq_runtime.domain.common.evidence import Evidence, EvidenceSet
-from opsiq_runtime.domain.primitives.operational_risk.model import OperationalRiskInput
+from opsiq_runtime.domain.common.input_protocol import CommonInput
 from opsiq_runtime.ports.outputs_repository import OutputsRepository
 from opsiq_runtime.settings import Settings, get_settings
 
@@ -218,7 +218,7 @@ class DatabricksOutputsRepository(OutputsRepository):
         return value.replace("'", "''")
 
     def write_decisions(
-        self, ctx: RunContext, decisions: Iterable[DecisionResult], inputs: Optional[list[OperationalRiskInput]] = None
+        self, ctx: RunContext, decisions: Iterable[DecisionResult], inputs: Optional[list[CommonInput]] = None
     ) -> None:
         """
         Write decisions to Databricks table using MERGE or DELETE+INSERT.
@@ -259,7 +259,7 @@ class DatabricksOutputsRepository(OutputsRepository):
         table_name: str,
         ctx: RunContext,
         decisions: list[DecisionResult],
-        inputs: list[OperationalRiskInput],
+        inputs: list[CommonInput],
         correlation_id: str | None,
     ) -> None:
         """Write decisions using MERGE INTO."""
@@ -357,7 +357,7 @@ class DatabricksOutputsRepository(OutputsRepository):
         table_name: str,
         ctx: RunContext,
         decisions: list[DecisionResult],
-        inputs: list[OperationalRiskInput],
+        inputs: list[CommonInput],
         correlation_id: str | None,
     ) -> None:
         """Write decisions using DELETE + INSERT for idempotency."""
@@ -385,25 +385,35 @@ class DatabricksOutputsRepository(OutputsRepository):
         self._write_decisions_merge(table_name, ctx, decisions, inputs, correlation_id)
 
     def write_evidence(
-        self, ctx: RunContext, evidence_sets: Iterable[EvidenceSet], inputs: Optional[list[OperationalRiskInput]] = None
+        self,
+        ctx: RunContext,
+        evidence_sets: Iterable[EvidenceSet],
+        inputs: Optional[list[CommonInput]] = None,
+        decisions: Optional[Iterable[DecisionResult]] = None,
     ) -> None:
         """
         Write evidence to Databricks table using MERGE or DELETE+INSERT.
 
         Requires inputs parameter to extract metadata.
+        Requires decisions parameter to get canonical_version from config.
         """
         if inputs is None:
             raise ValueError("DatabricksOutputsRepository.write_evidence requires inputs parameter")
+        if decisions is None:
+            raise ValueError("DatabricksOutputsRepository.write_evidence requires decisions parameter")
 
         evidence_sets_list = list(evidence_sets)
-        if len(evidence_sets_list) != len(inputs):
-            raise ValueError(f"Mismatch: {len(evidence_sets_list)} evidence_sets vs {len(inputs)} inputs")
+        decisions_list = list(decisions)
+        if len(evidence_sets_list) != len(inputs) or len(decisions_list) != len(inputs):
+            raise ValueError(
+                f"Mismatch: {len(evidence_sets_list)} evidence_sets, {len(decisions_list)} decisions vs {len(inputs)} inputs"
+            )
 
-        # Flatten evidence sets to individual evidence records, maintaining input pairing
-        evidence_records: list[tuple[Evidence, OperationalRiskInput]] = []
-        for evidence_set, input_row in zip(evidence_sets_list, inputs):
+        # Flatten evidence sets to individual evidence records, maintaining input/decision pairing
+        evidence_records: list[tuple[Evidence, CommonInput, DecisionResult]] = []
+        for evidence_set, input_row, decision in zip(evidence_sets_list, inputs, decisions_list):
             for evidence in evidence_set.evidence:
-                evidence_records.append((evidence, input_row))
+                evidence_records.append((evidence, input_row, decision))
 
         if not evidence_records:
             logger.info("No evidence records to write")
@@ -434,12 +444,12 @@ class DatabricksOutputsRepository(OutputsRepository):
         self,
         table_name: str,
         ctx: RunContext,
-        evidence_records: list[tuple[Evidence, OperationalRiskInput]],
+        evidence_records: list[tuple[Evidence, CommonInput, DecisionResult]],
         correlation_id: str | None,
     ) -> None:
         """Write evidence using MERGE INTO."""
         values_parts = []
-        for evidence, input_row in evidence_records:
+        for evidence, input_row, decision in evidence_records:
             evidence_json = json.dumps(
                 {
                     "evidence_id": evidence.evidence_id,
@@ -460,7 +470,7 @@ class DatabricksOutputsRepository(OutputsRepository):
                 f"'{self._escape_sql_string(str(input_row.subject_id))}', "
                 f"'{self._escape_sql_string(ctx.primitive_name)}', "
                 f"'{self._escape_sql_string(ctx.primitive_version)}', "
-                f"'{self._escape_sql_string(input_row.canonical_version)}', "
+                f"'{self._escape_sql_string(decision.versions.canonical_version)}', "
                 f"'{self._escape_sql_string(input_row.config_version)}', "
                 f"'{self._format_datetime(input_row.as_of_ts)}', "
                 f"'{self._escape_sql_string(evidence.evidence_id)}', "
@@ -523,13 +533,13 @@ class DatabricksOutputsRepository(OutputsRepository):
         self,
         table_name: str,
         ctx: RunContext,
-        evidence_records: list[tuple[Evidence, OperationalRiskInput]],
+        evidence_records: list[tuple[Evidence, CommonInput, DecisionResult]],
         correlation_id: str | None,
     ) -> None:
         """Write evidence using DELETE + INSERT for idempotency."""
         # Use simpler MERGE key: (tenant_id, evidence_id)
         where_clauses = []
-        for evidence, input_row in evidence_records:
+        for evidence, input_row, _decision in evidence_records:
             where_clauses.append(
                 f"(tenant_id = '{self._escape_sql_string(str(input_row.tenant_id))}' "
                 f"AND evidence_id = '{self._escape_sql_string(evidence.evidence_id)}')"

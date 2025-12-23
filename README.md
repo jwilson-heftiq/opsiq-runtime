@@ -1,6 +1,6 @@
 # OpsIQ Runtime
 
-Decision Intelligence Runtime walking skeleton implementing the `operational_risk` primitive with hexagonal architecture (ports & adapters).
+Decision Intelligence Runtime walking skeleton implementing decision primitives (`operational_risk`, `shopper_frequency_trend`) with hexagonal architecture (ports & adapters).
 
 ## Quick start (local)
 - Python 3.13 recommended.
@@ -70,16 +70,19 @@ Optional settings:
 
 The Databricks adapters expect the following tables:
 
-**Input Table:**
-- `{prefix}gold_canonical_shopper_recency_input_v1`
+**Input Tables:**
+- `{prefix}gold_canonical_shopper_recency_input_v1` (for `operational_risk` primitive)
   - Columns: `tenant_id`, `subject_type`, `subject_id`, `as_of_ts`, `last_trip_ts`, `days_since_last_trip`, `config_version`
   - Note: `canonical_version` is derived from `config_version` if not present in the table
 
+- `{prefix}gold_canonical_shopper_frequency_input_v1` (for `shopper_frequency_trend` primitive)
+  - Columns: `tenant_id`, `subject_type`, `subject_id`, `as_of_ts`, `last_trip_ts`, `prev_trip_ts`, `recent_gap_days`, `baseline_avg_gap_days`, `baseline_trip_count`, `baseline_window_days`, `config_version`
+
 **Output Tables:**
-- `{prefix}gold_decision_output_operational_risk_v1`
+- `{prefix}gold_decision_output_v1` (shared by all primitives)
   - Columns: `tenant_id`, `subject_type`, `subject_id`, `primitive_name`, `primitive_version`, `canonical_version`, `config_version`, `as_of_ts`, `decision_state`, `confidence`, `drivers_json`, `metrics_json`, `evidence_refs_json`, `computed_at`, `valid_until`, `correlation_id`
 
-- `{prefix}gold_decision_evidence_operational_risk_v1`
+- `{prefix}gold_decision_evidence_v1` (shared by all primitives)
   - Columns: `tenant_id`, `subject_type`, `subject_id`, `primitive_name`, `primitive_version`, `canonical_version`, `config_version`, `as_of_ts`, `evidence_id`, `evidence_json`, `computed_at`, `correlation_id`
 
 Where `{prefix}` is the value of `DATABRICKS_TABLE_PREFIX` (empty by default).
@@ -107,7 +110,7 @@ The `/run` endpoint accepts a JSON payload with the following fields:
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `tenant_id` | string | **Yes** | Identifies the tenant/customer. Used to filter input data and partition output data. Example: `"price_chopper"` |
-| `primitive_name` | string | **Yes** | The decision primitive to execute. Currently supported: `"operational_risk"` |
+| `primitive_name` | string | **Yes** | The decision primitive to execute. Supported: `"operational_risk"`, `"shopper_frequency_trend"` |
 | `config_version` | string | **Yes** | Version of the configuration to use. Determines thresholds and rules. Example: `"cfg_v1"` |
 | `as_of_ts` | string (ISO 8601) | No | The point-in-time for evaluation. Defaults to current time if omitted. See details below. |
 | `correlation_id` | string | No | Unique identifier for this run, used for tracing and idempotency. Auto-generated if omitted. |
@@ -168,4 +171,89 @@ This will:
 4. Write evidence to `gold_decision_evidence_operational_risk_v1`
 
 All writes are idempotent using MERGE INTO (or DELETE+INSERT if `DATABRICKS_USE_MERGE=false`).
+
+## Primitives
+
+### operational_risk
+
+Evaluates whether a shopper is at risk of churning based on days since last trip.
+
+**Decision States:**
+- `AT_RISK`: Shopper has not visited in `at_risk_days` or more
+- `NOT_AT_RISK`: Shopper visited within `at_risk_days`
+- `UNKNOWN`: Insufficient data (no `last_trip_ts`)
+
+**Configuration:**
+- `at_risk_days` (default: 30, env: `DEFAULT_AT_RISK_DAYS`)
+
+**Example:**
+```bash
+python -m opsiq_runtime.app.cli run --tenant price_chopper --primitive operational_risk --config cfg_v1
+```
+
+### shopper_frequency_trend
+
+Evaluates shopper trip frequency trends by comparing recent trip cadence to baseline.
+
+**Decision States:**
+- `DECLINING`: Recent trip cadence is slowing (ratio >= `decline_ratio_threshold`)
+- `STABLE`: Recent trip cadence is similar to baseline (between thresholds)
+- `IMPROVING`: Recent trip cadence is accelerating (ratio <= `improve_ratio_threshold`)
+- `UNKNOWN`: Insufficient data or invalid baseline
+
+**Configuration:**
+- `baseline_window_days` (default: 90, env: `DEFAULT_BASELINE_WINDOW_DAYS`)
+- `min_baseline_trips` (default: 4, env: `DEFAULT_MIN_BASELINE_TRIPS`)
+- `decline_ratio_threshold` (default: 1.5, env: `DEFAULT_DECLINE_RATIO_THRESHOLD`)
+- `improve_ratio_threshold` (default: 0.75, env: `DEFAULT_IMPROVE_RATIO_THRESHOLD`)
+- `max_reasonable_gap_days` (default: 365, env: `DEFAULT_MAX_REASONABLE_GAP_DAYS`)
+
+**Input Table:** `gold_canonical_shopper_frequency_input_v1`
+
+**Evaluation Logic:**
+1. If `last_trip_ts` or `prev_trip_ts` is missing → `UNKNOWN` (insufficient trip history)
+2. If `baseline_trip_count < min_baseline_trips` → `UNKNOWN` (insufficient baseline)
+3. If `baseline_avg_gap_days` is missing or <= 0 → `UNKNOWN` (invalid baseline)
+4. If `recent_gap_days` is missing → `UNKNOWN` (recent gap missing)
+5. If `recent_gap_days > max_reasonable_gap_days` → `UNKNOWN` (out of range)
+6. Otherwise, compute `ratio = recent_gap_days / baseline_avg_gap_days`:
+   - If `ratio >= decline_ratio_threshold` → `DECLINING` (cadence slowing)
+   - Else if `ratio <= improve_ratio_threshold` → `IMPROVING` (cadence accelerating)
+   - Else → `STABLE` (cadence stable)
+
+**Example:**
+```bash
+python -m opsiq_runtime.app.cli run --tenant price_chopper --primitive shopper_frequency_trend --config cfg_v1
+```
+
+**Example API Request:**
+```bash
+curl -X POST http://localhost:8080/run \
+  -H "Content-Type: application/json" \
+  -d '{
+    "tenant_id": "price_chopper",
+    "primitive_name": "shopper_frequency_trend",
+    "config_version": "cfg_v1",
+    "as_of_ts": "2024-01-01T00:00:00Z",
+    "correlation_id": "abc-123"
+  }'
+```
+
+**Example Response:**
+```json
+{
+  "tenant_id": "price_chopper",
+  "primitive_name": "shopper_frequency_trend",
+  "primitive_version": "1.0.0",
+  "config_version": "cfg_v1",
+  "count": 774470,
+  "state_counts": {
+    "DECLINING": 50000,
+    "STABLE": 650000,
+    "IMPROVING": 70000,
+    "UNKNOWN": 4470
+  },
+  "duration_ms": 45230
+}
+```
 

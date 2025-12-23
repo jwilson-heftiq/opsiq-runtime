@@ -12,6 +12,12 @@ class Settings:
     log_level: str = "INFO"
     default_at_risk_days: int = 30
     output_dir: str = "/tmp/opsiq-runtime-output"
+    # Shopper frequency trend defaults
+    default_baseline_window_days: int = 90
+    default_min_baseline_trips: int = 4
+    default_decline_ratio_threshold: float = 1.5
+    default_improve_ratio_threshold: float = 0.75
+    default_max_reasonable_gap_days: int = 365
     # Databricks settings
     databricks_server_hostname: Optional[str] = None
     databricks_http_path: Optional[str] = None
@@ -28,6 +34,11 @@ class Settings:
             log_level=os.getenv("LOG_LEVEL", cls.log_level),
             default_at_risk_days=int(os.getenv("DEFAULT_AT_RISK_DAYS", cls.default_at_risk_days)),
             output_dir=os.getenv("OUTPUT_DIR", cls.output_dir),
+            default_baseline_window_days=int(os.getenv("DEFAULT_BASELINE_WINDOW_DAYS", cls.default_baseline_window_days)),
+            default_min_baseline_trips=int(os.getenv("DEFAULT_MIN_BASELINE_TRIPS", cls.default_min_baseline_trips)),
+            default_decline_ratio_threshold=float(os.getenv("DEFAULT_DECLINE_RATIO_THRESHOLD", cls.default_decline_ratio_threshold)),
+            default_improve_ratio_threshold=float(os.getenv("DEFAULT_IMPROVE_RATIO_THRESHOLD", cls.default_improve_ratio_threshold)),
+            default_max_reasonable_gap_days=int(os.getenv("DEFAULT_MAX_REASONABLE_GAP_DAYS", cls.default_max_reasonable_gap_days)),
             databricks_server_hostname=os.getenv("DATABRICKS_SERVER_HOSTNAME"),
             databricks_http_path=os.getenv("DATABRICKS_HTTP_PATH"),
             databricks_access_token=os.getenv("DATABRICKS_ACCESS_TOKEN"),

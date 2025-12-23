@@ -7,13 +7,13 @@ from typing import Iterable, Optional
 from opsiq_runtime.application.run_context import RunContext
 from opsiq_runtime.domain.common.decision import DecisionResult
 from opsiq_runtime.domain.common.evidence import EvidenceSet
-from opsiq_runtime.domain.primitives.operational_risk.model import OperationalRiskInput
+from opsiq_runtime.domain.common.input_protocol import CommonInput
 from opsiq_runtime.ports.outputs_repository import OutputsRepository
 
 
 class StdoutOutputsRepository(OutputsRepository):
     def write_decisions(
-        self, ctx: RunContext, decisions: Iterable[DecisionResult], inputs: Optional[list[OperationalRiskInput]] = None
+        self, ctx: RunContext, decisions: Iterable[DecisionResult], inputs: Optional[list[CommonInput]] = None
     ) -> None:
         payload = [
             {
@@ -34,7 +34,11 @@ class StdoutOutputsRepository(OutputsRepository):
         sys.stdout.write(json.dumps({"type": "decisions", "data": payload}) + "\n")
 
     def write_evidence(
-        self, ctx: RunContext, evidence_sets: Iterable[EvidenceSet], inputs: Optional[list[OperationalRiskInput]] = None
+        self,
+        ctx: RunContext,
+        evidence_sets: Iterable[EvidenceSet],
+        inputs: Optional[list[CommonInput]] = None,
+        decisions: Optional[Iterable[DecisionResult]] = None,
     ) -> None:
         payload = []
         for e_set in evidence_sets:

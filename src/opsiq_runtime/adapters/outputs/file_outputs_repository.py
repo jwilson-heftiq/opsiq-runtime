@@ -7,7 +7,7 @@ from typing import Iterable, Optional
 from opsiq_runtime.application.run_context import RunContext
 from opsiq_runtime.domain.common.decision import DecisionResult
 from opsiq_runtime.domain.common.evidence import EvidenceSet
-from opsiq_runtime.domain.primitives.operational_risk.model import OperationalRiskInput
+from opsiq_runtime.domain.common.input_protocol import CommonInput
 from opsiq_runtime.ports.outputs_repository import OutputsRepository
 from opsiq_runtime.settings import get_settings
 
@@ -25,7 +25,7 @@ class FileOutputsRepository(OutputsRepository):
                 f.write("\n")
 
     def write_decisions(
-        self, ctx: RunContext, decisions: Iterable[DecisionResult], inputs: Optional[list[OperationalRiskInput]] = None
+        self, ctx: RunContext, decisions: Iterable[DecisionResult], inputs: Optional[list[CommonInput]] = None
     ) -> None:
         path = self.output_dir / f"{ctx.primitive_name}_decisions.jsonl"
         serializable = [
@@ -48,7 +48,11 @@ class FileOutputsRepository(OutputsRepository):
         self._write_jsonl(path, serializable)
 
     def write_evidence(
-        self, ctx: RunContext, evidence_sets: Iterable[EvidenceSet], inputs: Optional[list[OperationalRiskInput]] = None
+        self,
+        ctx: RunContext,
+        evidence_sets: Iterable[EvidenceSet],
+        inputs: Optional[list[CommonInput]] = None,
+        decisions: Optional[Iterable[DecisionResult]] = None,
     ) -> None:
         path = self.output_dir / f"{ctx.primitive_name}_evidence.jsonl"
         serializable = []

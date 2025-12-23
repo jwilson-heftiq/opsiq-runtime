@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
 
 from opsiq_runtime.domain.primitives.operational_risk.config import OperationalRiskConfig
+from opsiq_runtime.domain.primitives.shopper_frequency_trend.config import ShopperFrequencyTrendConfig
 from opsiq_runtime.ports.config_provider import ConfigProvider
 from opsiq_runtime.settings import get_settings
 
@@ -15,14 +16,41 @@ class InlineConfigProvider(ConfigProvider):
     def __init__(self, config_path: Optional[str] = None) -> None:
         self.config_path = Path(config_path) if config_path else None
 
-    def get_config(self, tenant_id: str, config_version: str) -> OperationalRiskConfig:
-        if self.config_path and self.config_path.exists():
-            with self.config_path.open() as f:
-                data = json.load(f)
-            tenant_cfg = data.get(tenant_id, {}).get(config_version) or data.get("default", {})
-            if tenant_cfg:
-                return OperationalRiskConfig(
-                    at_risk_days=int(tenant_cfg.get("at_risk_days", get_settings().default_at_risk_days))
-                )
-        return OperationalRiskConfig(at_risk_days=get_settings().default_at_risk_days)
+    def get_config(
+        self, tenant_id: str, config_version: str, primitive_name: str | None = None
+    ) -> Union[OperationalRiskConfig, ShopperFrequencyTrendConfig]:
+        settings = get_settings()
+        
+        # Determine which primitive based on primitive_name
+        if primitive_name == "shopper_frequency_trend":
+            if self.config_path and self.config_path.exists():
+                with self.config_path.open() as f:
+                    data = json.load(f)
+                tenant_cfg = data.get(tenant_id, {}).get(config_version) or data.get("default", {})
+                if tenant_cfg:
+                    return ShopperFrequencyTrendConfig(
+                        baseline_window_days=int(tenant_cfg.get("baseline_window_days", settings.default_baseline_window_days)),
+                        min_baseline_trips=int(tenant_cfg.get("min_baseline_trips", settings.default_min_baseline_trips)),
+                        decline_ratio_threshold=float(tenant_cfg.get("decline_ratio_threshold", settings.default_decline_ratio_threshold)),
+                        improve_ratio_threshold=float(tenant_cfg.get("improve_ratio_threshold", settings.default_improve_ratio_threshold)),
+                        max_reasonable_gap_days=int(tenant_cfg.get("max_reasonable_gap_days", settings.default_max_reasonable_gap_days)),
+                    )
+            return ShopperFrequencyTrendConfig(
+                baseline_window_days=settings.default_baseline_window_days,
+                min_baseline_trips=settings.default_min_baseline_trips,
+                decline_ratio_threshold=settings.default_decline_ratio_threshold,
+                improve_ratio_threshold=settings.default_improve_ratio_threshold,
+                max_reasonable_gap_days=settings.default_max_reasonable_gap_days,
+            )
+        else:
+            # Default to operational_risk
+            if self.config_path and self.config_path.exists():
+                with self.config_path.open() as f:
+                    data = json.load(f)
+                tenant_cfg = data.get(tenant_id, {}).get(config_version) or data.get("default", {})
+                if tenant_cfg:
+                    return OperationalRiskConfig(
+                        at_risk_days=int(tenant_cfg.get("at_risk_days", settings.default_at_risk_days))
+                    )
+            return OperationalRiskConfig(at_risk_days=settings.default_at_risk_days)
 

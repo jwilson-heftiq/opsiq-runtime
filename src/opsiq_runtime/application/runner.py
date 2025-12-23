@@ -1,15 +1,13 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import List
+from typing import Any, List
 
 from opsiq_runtime.application.registry import Registry
 from opsiq_runtime.application.run_context import RunContext
 from opsiq_runtime.domain.common.decision import DecisionResult
 from opsiq_runtime.domain.common.evidence import EvidenceSet
-from opsiq_runtime.domain.primitives.operational_risk.evaluator import OperationalRiskResult
-from opsiq_runtime.domain.primitives.operational_risk.model import OperationalRiskInput
-from opsiq_runtime.domain.primitives.operational_risk import rules
+from opsiq_runtime.domain.common.input_protocol import CommonInput
 from opsiq_runtime.ports.config_provider import ConfigProvider
 from opsiq_runtime.ports.event_publisher import EventPublisher
 from opsiq_runtime.ports.inputs_repository import InputsRepository
@@ -39,7 +37,8 @@ class Runner:
         self.lock_manager.acquire(ctx)
 
         # Get config early so we can use canonical_version for run registry
-        config = self.config_provider.get_config(ctx.tenant_id, ctx.config_version)
+        # Pass primitive_name to config provider
+        config = self.config_provider.get_config(ctx.tenant_id, ctx.config_version, ctx.primitive_name)
 
         # Register run started (if outputs_repo supports it)
         if hasattr(self.outputs_repo, "register_run_started"):
@@ -49,10 +48,14 @@ class Runner:
             self.registry.ensure_version(ctx.primitive_name, ctx.primitive_version, ctx.config_version)
             evaluator = self.registry.get(ctx.primitive_name, ctx.primitive_version)
 
+            # Get the correct input fetch method for this primitive
+            fetch_method_name = self.registry.get_input_fetch_method(ctx.primitive_name)
+            fetch_method = getattr(self.inputs_repo, fetch_method_name)
+
             # Collect inputs and results together to maintain pairing for outputs repository
-            inputs_list: List[OperationalRiskInput] = []
-            results: List[OperationalRiskResult] = []
-            for input_row in self.inputs_repo.fetch_operational_risk_inputs(ctx):
+            inputs_list: List[CommonInput] = []
+            results: List[Any] = []
+            for input_row in fetch_method(ctx):
                 inputs_list.append(input_row)
                 results.append(evaluator(input_row, config))
 
@@ -60,15 +63,21 @@ class Runner:
             evidence_sets: List[EvidenceSet] = [r.evidence_set for r in results]
 
             self.outputs_repo.write_decisions(ctx, decisions, inputs_list)
-            self.outputs_repo.write_evidence(ctx, evidence_sets, inputs_list)
+            self.outputs_repo.write_evidence(ctx, evidence_sets, inputs_list, decisions)
 
-            # Count decision states
-            at_risk_count = sum(1 for d in decisions if d.state == rules.AT_RISK)
-            not_at_risk_count = sum(1 for d in decisions if d.state == rules.NOT_AT_RISK)
-            unknown_count = sum(1 for d in decisions if d.state == rules.UNKNOWN)
+            # Count decision states (primitive-agnostic)
+            # For operational_risk: AT_RISK, NOT_AT_RISK, UNKNOWN
+            # For shopper_frequency_trend: DECLINING, STABLE, IMPROVING, UNKNOWN
+            state_counts: dict[str, int] = {}
+            for d in decisions:
+                state_counts[d.state] = state_counts.get(d.state, 0) + 1
 
             # Register run completed (if outputs_repo supports it)
             if hasattr(self.outputs_repo, "register_run_completed"):
+                # For backward compatibility, extract counts for operational_risk states
+                at_risk_count = state_counts.get("AT_RISK", 0)
+                not_at_risk_count = state_counts.get("NOT_AT_RISK", 0)
+                unknown_count = state_counts.get("UNKNOWN", 0)
                 self.outputs_repo.register_run_completed(
                     ctx,
                     started_at=started_at,
@@ -86,11 +95,14 @@ class Runner:
                 "primitive_version": ctx.primitive_version,
                 "config_version": ctx.config_version,
                 "count": len(results),
-                "at_risk_count": at_risk_count,
-                "not_at_risk_count": not_at_risk_count,
-                "unknown_count": unknown_count,
+                "state_counts": state_counts,
                 "duration_ms": duration_ms,
             }
+            # For backward compatibility, include operational_risk specific counts
+            if ctx.primitive_name == "operational_risk":
+                summary["at_risk_count"] = state_counts.get("AT_RISK", 0)
+                summary["not_at_risk_count"] = state_counts.get("NOT_AT_RISK", 0)
+                summary["unknown_count"] = state_counts.get("UNKNOWN", 0)
             self.event_publisher.publish_decision_ready(ctx, summary)
             return summary
 
