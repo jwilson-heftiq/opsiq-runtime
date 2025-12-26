@@ -12,6 +12,8 @@ from opsiq_runtime.adapters.databricks.client import DatabricksSqlClient
 from opsiq_runtime.app.api.models.decisions import (
     DecisionBundle,
     DecisionDetail,
+    DecisionHistoryItem,
+    DecisionHistoryResponse,
     DecisionListResponse,
     DecisionListItem,
     EvidenceRecord,
@@ -551,4 +553,136 @@ class DecisionsRepository:
             evidence_refs=self._parse_json_field(row.get("evidence_refs_json"), []),
             correlation_id=str(row["correlation_id"]) if row.get("correlation_id") else None,
         )
+
+    def get_decision_history(
+        self,
+        tenant_id: str,
+        subject_id: str,
+        primitive_names: list[str] | None = None,
+        from_ts: datetime | None = None,
+        to_ts: datetime | None = None,
+        limit: int = 100,
+    ) -> DecisionHistoryResponse:
+        """
+        Get decision history for a subject across all primitives.
+
+        Args:
+            tenant_id: Tenant ID
+            subject_id: Subject ID
+            primitive_names: Optional list of primitive names to filter by
+            from_ts: Optional start timestamp for as_of_ts filter
+            to_ts: Optional end timestamp for as_of_ts filter
+            limit: Maximum number of results (default 100, max 500)
+
+        Returns:
+            DecisionHistoryResponse with subject_id and items
+        """
+        # Enforce max limit
+        limit = min(limit, 500)
+
+        decision_table = self._build_table_name(self.decision_table_name)
+
+        # Build WHERE conditions
+        conditions = [
+            "tenant_id = ?",
+            "subject_type = 'shopper'",
+            "subject_id = ?",
+        ]
+        params: list[Any] = [tenant_id, subject_id]
+
+        # Add primitive_name filter
+        if primitive_names:
+            placeholders = ",".join(["?"] * len(primitive_names))
+            conditions.append(f"primitive_name IN ({placeholders})")
+            params.extend(primitive_names)
+
+        # Add as_of_ts range filters
+        if from_ts:
+            conditions.append("as_of_ts >= ?")
+            params.append(from_ts.isoformat())
+
+        if to_ts:
+            conditions.append("as_of_ts <= ?")
+            params.append(to_ts.isoformat())
+
+        where_clause = " AND ".join(conditions)
+
+        # SQL query sorted by as_of_ts DESC
+        sql = f"""
+        SELECT
+            tenant_id,
+            subject_type,
+            subject_id,
+            primitive_name,
+            primitive_version,
+            as_of_ts,
+            decision_state,
+            confidence,
+            drivers_json,
+            computed_at
+        FROM {decision_table}
+        WHERE {where_clause}
+        ORDER BY as_of_ts DESC
+        LIMIT ?
+        """
+
+        params.append(limit)
+
+        try:
+            rows = self.client.query(sql, params)
+        except Exception as e:
+            logger.error(f"Error querying decision history: {e}")
+            raise
+
+        # Convert rows to DecisionHistoryItem
+        items: list[DecisionHistoryItem] = []
+        for row in rows:
+            try:
+                as_of_ts = row.get("as_of_ts")
+                if isinstance(as_of_ts, str):
+                    as_of_ts = datetime.fromisoformat(as_of_ts.replace("Z", "+00:00"))
+                elif not isinstance(as_of_ts, datetime):
+                    logger.warning(f"Invalid as_of_ts format: {as_of_ts}")
+                    continue
+
+                computed_at = row.get("computed_at")
+                if isinstance(computed_at, str):
+                    computed_at = datetime.fromisoformat(computed_at.replace("Z", "+00:00"))
+                elif not isinstance(computed_at, datetime):
+                    logger.warning(f"Invalid computed_at format: {computed_at}")
+                    continue
+
+                # Parse drivers_json - it should be an array, each element may be a string or object with 'code'
+                drivers_json = row.get("drivers_json")
+                drivers: list[dict[str, str]] = []
+                if drivers_json:
+                    try:
+                        parsed = json.loads(drivers_json) if isinstance(drivers_json, str) else drivers_json
+                        if isinstance(parsed, list):
+                            for driver in parsed:
+                                if isinstance(driver, str):
+                                    drivers.append({"code": driver})
+                                elif isinstance(driver, dict) and "code" in driver:
+                                    drivers.append({"code": str(driver["code"])})
+                                elif isinstance(driver, dict):
+                                    # Try to extract code if it exists
+                                    drivers.append({"code": str(driver.get("code", ""))})
+                    except (json.JSONDecodeError, TypeError) as e:
+                        logger.warning(f"Failed to parse drivers_json: {e}")
+
+                item = DecisionHistoryItem(
+                    primitive_name=str(row["primitive_name"]),
+                    primitive_version=str(row["primitive_version"]),
+                    as_of_ts=as_of_ts,
+                    decision_state=str(row["decision_state"]),
+                    confidence=str(row["confidence"]),
+                    drivers=drivers,
+                    computed_at=computed_at,
+                )
+                items.append(item)
+            except Exception as e:
+                logger.warning(f"Error parsing decision history row: {e}")
+                continue
+
+        return DecisionHistoryResponse(subject_id=subject_id, items=items)
 

@@ -41,3 +41,28 @@ services:
     command: ["run"]
     # Override with: docker-compose --profile cli run cli --tenant price_chopper --primitive operational_risk --config cfg_v1
 
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        - NEXT_PUBLIC_OPSIQ_API_BASE_URL=${OPSIQ_API_BASE_URL:-http://localhost:8080}
+    ports:
+      - "3000:3000"
+    env_file:
+      - .env
+    environment:
+      # Server-side requests use OPSIQ_API_BASE_URL (can use Docker service name)
+      - OPSIQ_API_BASE_URL=${OPSIQ_API_BASE_URL:-http://api:8080}
+      # Client-side requests use NEXT_PUBLIC_OPSIQ_API_BASE_URL (browser uses localhost)
+      - NEXT_PUBLIC_OPSIQ_API_BASE_URL=${OPSIQ_API_BASE_URL:-http://localhost:8080}
+    profiles:
+      - frontend
+      - dev
+    depends_on:
+      - api
+    # Note: 
+    # - Server-side requests use OPSIQ_API_BASE_URL (defaults to http://api:8080 via service name)
+    # - Client-side requests use NEXT_PUBLIC_OPSIQ_API_BASE_URL (defaults to http://localhost:8080)
+    # Set OPSIQ_API_BASE_URL in .env to override defaults
+

@@ -7,7 +7,7 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from opsiq_runtime.adapters.databricks.client import DatabricksSqlClient
-from opsiq_runtime.app.api.models.decisions import DecisionBundle
+from opsiq_runtime.app.api.models.decisions import DecisionBundle, DecisionHistoryResponse
 from opsiq_runtime.app.api.repositories.decisions_repo import DecisionsRepository
 from opsiq_runtime.settings import Settings, get_settings
 
@@ -54,4 +54,33 @@ def get_decision_bundle(
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error fetching decision bundle: {str(e)}")
+
+
+@router.get("/tenants/{tenant_id}/subjects/shopper/{subject_id}/decision-history", response_model=DecisionHistoryResponse)
+def get_decision_history(
+    tenant_id: str,
+    subject_id: str,
+    primitive_name: list[str] | None = Query(None, description="Filter by primitive names (repeatable)"),
+    from_ts: datetime | None = Query(None, description="Start timestamp for as_of_ts filter (ISO format)"),
+    to_ts: datetime | None = Query(None, description="End timestamp for as_of_ts filter (ISO format)"),
+    limit: int = Query(100, ge=1, le=500, description="Maximum number of results"),
+    repository: DecisionsRepository = Depends(get_decisions_repository),
+) -> DecisionHistoryResponse:
+    """
+    Get decision history for a subject across all primitives.
+
+    Returns time-ordered decisions (newest first) for the specified subject.
+    Supports optional filtering by primitive_name and as_of_ts range.
+    """
+    try:
+        return repository.get_decision_history(
+            tenant_id=tenant_id,
+            subject_id=subject_id,
+            primitive_names=primitive_name,
+            from_ts=from_ts,
+            to_ts=to_ts,
+            limit=limit,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching decision history: {str(e)}")
 

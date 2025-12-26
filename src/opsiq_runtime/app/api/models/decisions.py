@@ -76,3 +76,22 @@ class DecisionBundle(BaseModel):
         description="Evidence grouped by primitive_name (composite, operational_risk, shopper_frequency_trend)",
     )
 
+
+class DecisionHistoryItem(BaseModel):
+    """Decision history item for a subject."""
+
+    primitive_name: str
+    primitive_version: str
+    as_of_ts: datetime = Field(..., description="ISO timestamp")
+    decision_state: str = Field(..., description="URGENT/WATCHLIST/HEALTHY/UNKNOWN or AT_RISK/NOT_AT_RISK")
+    confidence: str = Field(..., description="HIGH/MEDIUM/LOW")
+    drivers: list[dict[str, str]] = Field(default_factory=list, description="List of driver objects with 'code' field")
+    computed_at: datetime = Field(..., description="ISO timestamp")
+
+
+class DecisionHistoryResponse(BaseModel):
+    """Response for decision history endpoint."""
+
+    subject_id: str
+    items: list[DecisionHistoryItem]
+
