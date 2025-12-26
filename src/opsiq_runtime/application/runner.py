@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any, List
+from typing import Any, Callable, List, Optional
 
 from opsiq_runtime.application.registry import Registry
 from opsiq_runtime.application.run_context import RunContext
+from opsiq_runtime.application.errors import RunCancelledError
 from opsiq_runtime.domain.common.decision import DecisionResult
 from opsiq_runtime.domain.common.evidence import EvidenceSet
 from opsiq_runtime.domain.common.input_protocol import CommonInput
@@ -24,6 +25,7 @@ class Runner:
         event_publisher: EventPublisher,
         lock_manager: LockManager,
         registry: Registry,
+        cancellation_check: Optional[Callable[[], bool]] = None,
     ) -> None:
         self.config_provider = config_provider
         self.inputs_repo = inputs_repo
@@ -31,6 +33,7 @@ class Runner:
         self.event_publisher = event_publisher
         self.lock_manager = lock_manager
         self.registry = registry
+        self.cancellation_check = cancellation_check
 
     def run(self, ctx: RunContext) -> dict:
         started_at = datetime.now(timezone.utc)
@@ -56,6 +59,9 @@ class Runner:
             inputs_list: List[CommonInput] = []
             results: List[Any] = []
             for input_row in fetch_method(ctx):
+                # Check for cancellation
+                if self.cancellation_check and self.cancellation_check():
+                    raise RunCancelledError(f"Run cancelled for correlation_id={ctx.correlation_id}")
                 inputs_list.append(input_row)
                 results.append(evaluator(input_row, config))
 
@@ -106,6 +112,11 @@ class Runner:
             self.event_publisher.publish_decision_ready(ctx, summary)
             return summary
 
+        except RunCancelledError as e:
+            # Register run cancelled (if outputs_repo supports it)
+            if hasattr(self.outputs_repo, "register_run_failed"):
+                self.outputs_repo.register_run_failed(ctx, started_at, e)
+            raise
         except Exception as e:
             # Register run failed (if outputs_repo supports it)
             if hasattr(self.outputs_repo, "register_run_failed"):

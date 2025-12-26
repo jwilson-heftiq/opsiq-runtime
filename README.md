@@ -1,6 +1,6 @@
 # OpsIQ Runtime
 
-Decision Intelligence Runtime walking skeleton implementing decision primitives (`operational_risk`, `shopper_frequency_trend`) with hexagonal architecture (ports & adapters).
+Decision Intelligence Runtime walking skeleton implementing decision primitives (`operational_risk`, `shopper_frequency_trend`, `shopper_health_classification`) with hexagonal architecture (ports & adapters).
 
 ## Quick start (local)
 - Python 3.13 recommended.
@@ -27,11 +27,23 @@ Decision Intelligence Runtime walking skeleton implementing decision primitives 
 - Run API: `docker run -p 8080:8080 opsiq-runtime`
 - Run CLI: `docker run opsiq-runtime run --tenant price_chopper --primitive operational_risk --config cfg_v1`
 
-Example API call:
+Example API calls:
 ```
+# Async execution (default - returns immediately)
 curl -X POST http://localhost:8080/run \
   -H "Content-Type: application/json" \
   -d '{"tenant_id":"price_chopper","primitive_name":"operational_risk","config_version":"cfg_v1","as_of_ts":"2024-01-01T00:00:00Z","correlation_id":"abc-123"}'
+
+# Check job status
+curl http://localhost:8080/status/abc-123
+
+# Cancel a running job
+curl -X POST http://localhost:8080/cancel/abc-123
+
+# Synchronous execution (blocks until completion)
+curl -X POST http://localhost:8080/run/sync \
+  -H "Content-Type: application/json" \
+  -d '{"tenant_id":"price_chopper","primitive_name":"operational_risk","config_version":"cfg_v1"}'
 ```
 
 ## Architecture notes
@@ -78,6 +90,10 @@ The Databricks adapters expect the following tables:
 - `{prefix}gold_canonical_shopper_frequency_input_v1` (for `shopper_frequency_trend` primitive)
   - Columns: `tenant_id`, `subject_type`, `subject_id`, `as_of_ts`, `last_trip_ts`, `prev_trip_ts`, `recent_gap_days`, `baseline_avg_gap_days`, `baseline_trip_count`, `baseline_window_days`, `config_version`
 
+- `{prefix}gold_decision_output_v1` (for `shopper_health_classification` primitive - composite primitive that reads from this table)
+  - This primitive reads decision outputs from `operational_risk` and `shopper_frequency_trend` primitives stored in this table
+  - Filters by `tenant_id`, `subject_type='shopper'`, and `primitive_name IN ('operational_risk','shopper_frequency_trend')`
+
 **Output Tables:**
 - `{prefix}gold_decision_output_v1` (shared by all primitives)
   - Columns: `tenant_id`, `subject_type`, `subject_id`, `primitive_name`, `primitive_version`, `canonical_version`, `config_version`, `as_of_ts`, `decision_state`, `confidence`, `drivers_json`, `metrics_json`, `evidence_refs_json`, `computed_at`, `valid_until`, `correlation_id`
@@ -110,7 +126,7 @@ The `/run` endpoint accepts a JSON payload with the following fields:
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `tenant_id` | string | **Yes** | Identifies the tenant/customer. Used to filter input data and partition output data. Example: `"price_chopper"` |
-| `primitive_name` | string | **Yes** | The decision primitive to execute. Supported: `"operational_risk"`, `"shopper_frequency_trend"` |
+| `primitive_name` | string | **Yes** | The decision primitive to execute. Supported: `"operational_risk"`, `"shopper_frequency_trend"`, `"shopper_health_classification"` |
 | `config_version` | string | **Yes** | Version of the configuration to use. Determines thresholds and rules. Example: `"cfg_v1"` |
 | `as_of_ts` | string (ISO 8601) | No | The point-in-time for evaluation. Defaults to current time if omitted. See details below. |
 | `correlation_id` | string | No | Unique identifier for this run, used for tracing and idempotency. Auto-generated if omitted. |
@@ -133,6 +149,7 @@ For the `operational_risk` primitive, `as_of_ts` is used to:
 
 ### Example API Request
 
+**Async execution (default - returns immediately):**
 ```bash
 curl -X POST http://localhost:8080/run \
   -H "Content-Type: application/json" \
@@ -146,8 +163,29 @@ curl -X POST http://localhost:8080/run \
   }'
 ```
 
-### Example Response
+**Response (async):**
+```json
+{
+  "correlation_id": "abc-123",
+  "status": "started",
+  "message": "Job started. Use /status/{correlation_id} to check progress."
+}
+```
 
+**Synchronous execution (blocks until completion):**
+```bash
+curl -X POST http://localhost:8080/run/sync \
+  -H "Content-Type: application/json" \
+  -d '{
+    "tenant_id": "price_chopper",
+    "primitive_name": "operational_risk",
+    "config_version": "cfg_v1",
+    "as_of_ts": "2024-01-01T00:00:00Z",
+    "correlation_id": "abc-123"
+  }'
+```
+
+**Response (sync):**
 ```json
 {
   "tenant_id": "price_chopper",
@@ -161,6 +199,72 @@ curl -X POST http://localhost:8080/run \
   "duration_ms": 45230
 }
 ```
+
+## Job Management
+
+The runtime supports async job execution with cancellation and status tracking.
+
+### Starting a Job
+
+The `/run` endpoint (default) starts jobs asynchronously and returns immediately with a `correlation_id`. If you don't provide a `correlation_id`, one will be auto-generated.
+
+### Checking Job Status
+
+Use the `/status/{correlation_id}` endpoint to check the status of a running or completed job:
+
+```bash
+curl http://localhost:8080/status/abc-123
+```
+
+**Response:**
+```json
+{
+  "correlation_id": "abc-123",
+  "tenant_id": "price_chopper",
+  "primitive_name": "operational_risk",
+  "status": "completed",
+  "started_at": "2024-01-01T00:00:00Z",
+  "completed_at": "2024-01-01T00:00:45Z",
+  "duration_ms": 45230,
+  "result": {
+    "tenant_id": "price_chopper",
+    "primitive_name": "operational_risk",
+    "count": 774470,
+    "at_risk_count": 123456,
+    "not_at_risk_count": 650000,
+    "unknown_count": 1014,
+    "duration_ms": 45230
+  }
+}
+```
+
+**Status values:**
+- `running` - Job is currently executing
+- `completed` - Job finished successfully
+- `cancelled` - Job was cancelled
+- `failed` - Job encountered an error
+
+### Cancelling a Job
+
+To stop a running job, use the `/cancel/{correlation_id}` endpoint:
+
+```bash
+curl -X POST http://localhost:8080/cancel/abc-123
+```
+
+**Response:**
+```json
+{
+  "correlation_id": "abc-123",
+  "status": "cancelled",
+  "message": "Job cancellation requested"
+}
+```
+
+**Notes:**
+- Cancellation is checked between processing each input row, so it may take a moment to take effect
+- Only jobs with status `running` can be cancelled
+- Cancelled jobs will have their status updated in the run registry (if using Databricks adapters)
 
 ### What Happens During a Run
 
@@ -252,6 +356,79 @@ curl -X POST http://localhost:8080/run \
     "STABLE": 650000,
     "IMPROVING": 70000,
     "UNKNOWN": 4470
+  },
+  "duration_ms": 45230
+}
+```
+
+### shopper_health_classification
+
+A composite primitive that combines outputs from `operational_risk` and `shopper_frequency_trend` to produce a single actionable shopper health classification.
+
+**Decision States:**
+- `URGENT`: Shopper is at risk of churning (risk_state = "AT_RISK")
+- `WATCHLIST`: Shopper shows declining cadence or unknown risk with declining trend
+- `HEALTHY`: Shopper is not at risk and has stable or improving cadence
+- `UNKNOWN`: Insufficient signals from both primitives
+
+**Configuration:**
+- No thresholds required for v1.0.0
+
+**Input Source:**
+- Reads from `gold_decision_output_v1` table
+- Filters for `operational_risk` and `shopper_frequency_trend` decision outputs
+- Pivots results to combine risk_state and trend_state per shopper
+
+**Composition Rules (priority-ordered):**
+1. If `risk_state == "AT_RISK"` → `URGENT` (confidence: HIGH, drivers: ["LAPSE_RISK"])
+2. If `risk_state == "UNKNOWN"` and `trend_state == "UNKNOWN"` → `UNKNOWN` (confidence: LOW, drivers: ["INSUFFICIENT_SIGNALS"])
+3. If `risk_state == "NOT_AT_RISK"` and `trend_state == "DECLINING"` → `WATCHLIST` (confidence: MEDIUM, drivers: ["CADENCE_DECLINING"])
+4. If `risk_state == "UNKNOWN"` and `trend_state == "DECLINING"` → `WATCHLIST` (confidence: LOW, drivers: ["CADENCE_DECLINING", "RISK_UNKNOWN"])
+5. If `risk_state == "NOT_AT_RISK"` and `trend_state in ("STABLE","IMPROVING")` → `HEALTHY` (confidence: HIGH, drivers: ["RISK_OK", "CADENCE_OK"])
+6. Else → `UNKNOWN` (confidence: MEDIUM, drivers: ["PARTIAL_SIGNALS"])
+
+**Evidence Structure:**
+- Evidence includes `applied_rule_id` identifying which composition rule was applied
+- `source_primitives` array contains metadata from both source primitives (primitive_name, primitive_version, as_of_ts, evidence_refs)
+- `composition_inputs` contains the risk_state and trend_state used for composition
+
+**Metrics:**
+- `risk_state`: The operational risk state from the source primitive
+- `trend_state`: The frequency trend state from the source primitive
+- `risk_source_as_of_ts`: Timestamp of the operational_risk decision (ISO format)
+- `trend_source_as_of_ts`: Timestamp of the shopper_frequency_trend decision (ISO format)
+
+**Example:**
+```bash
+python -m opsiq_runtime.app.cli run --tenant price_chopper --primitive shopper_health_classification --config cfg_v1
+```
+
+**Example API Request:**
+```bash
+curl -X POST http://localhost:8080/run \
+  -H "Content-Type: application/json" \
+  -d '{
+    "tenant_id": "price_chopper",
+    "primitive_name": "shopper_health_classification",
+    "config_version": "cfg_v1",
+    "as_of_ts": "2024-01-01T00:00:00Z",
+    "correlation_id": "abc-123"
+  }'
+```
+
+**Example Response:**
+```json
+{
+  "tenant_id": "price_chopper",
+  "primitive_name": "shopper_health_classification",
+  "primitive_version": "1.0.0",
+  "config_version": "cfg_v1",
+  "count": 774470,
+  "state_counts": {
+    "URGENT": 123456,
+    "WATCHLIST": 50000,
+    "HEALTHY": 600000,
+    "UNKNOWN": 1014
   },
   "duration_ms": 45230
 }

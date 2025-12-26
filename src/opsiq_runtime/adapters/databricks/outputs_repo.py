@@ -612,11 +612,16 @@ class DatabricksOutputsRepository(OutputsRepository):
         ) AS source
         ON target.tenant_id = source.tenant_id
             AND target.correlation_id = source.correlation_id
+            AND target.primitive_name = source.primitive_name
         WHEN MATCHED THEN
             UPDATE SET
                 status = source.status,
                 started_at = source.started_at,
-                updated_at = source.updated_at
+                updated_at = source.updated_at,
+                primitive_version = source.primitive_version,
+                canonical_version = source.canonical_version,
+                config_version = source.config_version,
+                as_of_ts = source.as_of_ts
         WHEN NOT MATCHED THEN
             INSERT (
                 tenant_id, primitive_name, primitive_version, canonical_version, config_version,
@@ -684,11 +689,12 @@ class DatabricksOutputsRepository(OutputsRepository):
             updated_at = '{now_ts}'
         WHERE tenant_id = '{self._escape_sql_string(str(ctx.tenant_id))}'
             AND correlation_id = '{self._escape_sql_string(correlation_id)}'
+            AND primitive_name = '{self._escape_sql_string(ctx.primitive_name)}'
         """
 
         try:
             self.client.execute(sql)
-            logger.info(f"Registered run completed for correlation_id={correlation_id}, duration={duration_ms}ms")
+            logger.info(f"Registered run completed for correlation_id={correlation_id}, primitive={ctx.primitive_name}, duration={duration_ms}ms")
         except Exception as e:
             logger.warning(f"Failed to register run completed: {e}")
             # Don't raise - run registry is best-effort
@@ -731,10 +737,11 @@ class DatabricksOutputsRepository(OutputsRepository):
             updated_at = '{now_ts}'
         WHERE tenant_id = '{self._escape_sql_string(str(ctx.tenant_id))}'
             AND correlation_id = '{self._escape_sql_string(correlation_id)}'
+            AND primitive_name = '{self._escape_sql_string(ctx.primitive_name)}'
         """
 
         try:
             self.client.execute(sql)
-            logger.info(f"Registered run failed for correlation_id={correlation_id}")
+            logger.info(f"Registered run failed for correlation_id={correlation_id}, primitive={ctx.primitive_name}")
         except Exception as e:
             logger.warning(f"Failed to register run failed: {e}")

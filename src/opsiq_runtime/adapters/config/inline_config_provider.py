@@ -6,6 +6,7 @@ from typing import Optional, Union
 
 from opsiq_runtime.domain.primitives.operational_risk.config import OperationalRiskConfig
 from opsiq_runtime.domain.primitives.shopper_frequency_trend.config import ShopperFrequencyTrendConfig
+from opsiq_runtime.domain.primitives.shopper_health_classification.config import ShopperHealthConfig
 from opsiq_runtime.ports.config_provider import ConfigProvider
 from opsiq_runtime.settings import get_settings
 
@@ -18,11 +19,13 @@ class InlineConfigProvider(ConfigProvider):
 
     def get_config(
         self, tenant_id: str, config_version: str, primitive_name: str | None = None
-    ) -> Union[OperationalRiskConfig, ShopperFrequencyTrendConfig]:
+    ) -> Union[OperationalRiskConfig, ShopperFrequencyTrendConfig, ShopperHealthConfig]:
         settings = get_settings()
         
         # Determine which primitive based on primitive_name
-        if primitive_name == "shopper_frequency_trend":
+        if primitive_name == "shopper_health_classification":
+            return ShopperHealthConfig()
+        elif primitive_name == "shopper_frequency_trend":
             if self.config_path and self.config_path.exists():
                 with self.config_path.open() as f:
                     data = json.load(f)

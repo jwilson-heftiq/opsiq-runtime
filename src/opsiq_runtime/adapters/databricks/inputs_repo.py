@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime
 from typing import Iterable
@@ -9,6 +10,7 @@ from opsiq_runtime.application.run_context import RunContext
 from opsiq_runtime.domain.common.ids import CorrelationId
 from opsiq_runtime.domain.primitives.operational_risk.model import OperationalRiskInput
 from opsiq_runtime.domain.primitives.shopper_frequency_trend.model import ShopperFrequencyInput
+from opsiq_runtime.domain.primitives.shopper_health_classification.model import ShopperHealthInput
 from opsiq_runtime.ports.inputs_repository import InputsRepository
 from opsiq_runtime.settings import Settings, get_settings
 
@@ -274,6 +276,174 @@ class DatabricksInputsRepository(InputsRepository):
         except Exception as e:
             logger.error(
                 f"Error fetching shopper frequency inputs from {table_name}: {e}",
+                extra={"correlation_id": ctx.correlation_id.value} if ctx.correlation_id else {},
+            )
+            raise
+
+    def fetch_shopper_health_inputs(self, ctx: RunContext) -> Iterable[ShopperHealthInput]:
+        """
+        Fetch shopper health classification inputs by reading decision outputs from
+        operational_risk and shopper_frequency_trend primitives.
+
+        Reads from gold_decision_output_v1, pivots results to get both risk_state and
+        trend_state per shopper. Handles missing primitives by setting state to UNKNOWN.
+        """
+        table_name = self._build_table_name_for_primitive("gold_decision_output_v1")
+        tenant_id = str(ctx.tenant_id)
+        as_of_ts = ctx.as_of_ts
+
+        # Build SQL query with pivot logic
+        # If as_of_ts provided, prefer rows with that timestamp, otherwise get latest per subject+primitive
+        sql = f"""
+        WITH ranked_decisions AS (
+            SELECT
+                tenant_id,
+                subject_type,
+                subject_id,
+                primitive_name,
+                decision_state,
+                evidence_refs_json,
+                as_of_ts,
+                config_version,
+                ROW_NUMBER() OVER (
+                    PARTITION BY subject_id, primitive_name
+                    ORDER BY 
+                        CASE WHEN as_of_ts = ? THEN 0 ELSE 1 END,
+                        as_of_ts DESC
+                ) as rn
+            FROM {table_name}
+            WHERE tenant_id = ?
+                AND subject_type = 'shopper'
+                AND primitive_name IN ('operational_risk', 'shopper_frequency_trend')
+                AND (? IS NULL OR as_of_ts <= ?)
+        ),
+        latest_decisions AS (
+            SELECT
+                tenant_id,
+                subject_type,
+                subject_id,
+                primitive_name,
+                decision_state,
+                evidence_refs_json,
+                as_of_ts,
+                config_version
+            FROM ranked_decisions
+            WHERE rn = 1
+        )
+        SELECT
+            tenant_id,
+            subject_type,
+            subject_id,
+            MAX(CASE WHEN primitive_name = 'operational_risk' THEN decision_state END) as risk_state,
+            MAX(CASE WHEN primitive_name = 'operational_risk' THEN evidence_refs_json END) as risk_evidence_refs_json,
+            MAX(CASE WHEN primitive_name = 'operational_risk' THEN as_of_ts END) as risk_source_as_of_ts,
+            MAX(CASE WHEN primitive_name = 'shopper_frequency_trend' THEN decision_state END) as trend_state,
+            MAX(CASE WHEN primitive_name = 'shopper_frequency_trend' THEN evidence_refs_json END) as trend_evidence_refs_json,
+            MAX(CASE WHEN primitive_name = 'shopper_frequency_trend' THEN as_of_ts END) as trend_source_as_of_ts,
+            COALESCE(
+                MAX(CASE WHEN primitive_name = 'operational_risk' THEN as_of_ts END),
+                MAX(CASE WHEN primitive_name = 'shopper_frequency_trend' THEN as_of_ts END)
+            ) as as_of_ts,
+            COALESCE(
+                MAX(CASE WHEN primitive_name = 'operational_risk' THEN config_version END),
+                MAX(CASE WHEN primitive_name = 'shopper_frequency_trend' THEN config_version END)
+            ) as config_version
+        FROM latest_decisions
+        GROUP BY tenant_id, subject_type, subject_id
+        ORDER BY subject_id
+        """
+
+        logger.info(
+            f"Fetching shopper health inputs from {table_name} for tenant {tenant_id}",
+            extra={"correlation_id": ctx.correlation_id.value} if ctx.correlation_id else {},
+        )
+
+        try:
+            # databricks-sql-connector uses positional parameters with ?
+            # Parameters: as_of_ts (for ordering), tenant_id, as_of_ts (for filter), as_of_ts (for filter)
+            as_of_ts_str = as_of_ts.isoformat() if as_of_ts else None
+            rows = self.client.query(sql, params=[as_of_ts_str, tenant_id, as_of_ts_str, as_of_ts_str])
+
+            inputs = []
+
+            for row in rows:
+                subject_id = str(row.get("subject_id", ""))
+                if not subject_id:
+                    logger.warning("Skipping row with empty subject_id")
+                    continue
+
+                as_of_ts_parsed = self._parse_timestamp(row.get("as_of_ts"))
+                if as_of_ts_parsed is None:
+                    logger.warning(f"Skipping row with null as_of_ts for subject {subject_id}")
+                    continue
+
+                # Parse risk state and evidence refs
+                risk_state = row.get("risk_state")
+                risk_evidence_refs_json = row.get("risk_evidence_refs_json")
+                risk_evidence_refs = []
+                if risk_evidence_refs_json:
+                    try:
+                        risk_evidence_refs = json.loads(risk_evidence_refs_json)
+                        if not isinstance(risk_evidence_refs, list):
+                            risk_evidence_refs = []
+                    except (json.JSONDecodeError, TypeError):
+                        logger.warning(f"Failed to parse risk_evidence_refs_json for subject {subject_id}")
+                        risk_evidence_refs = []
+
+                risk_source_as_of_ts = self._parse_timestamp(row.get("risk_source_as_of_ts"))
+
+                # Parse trend state and evidence refs
+                trend_state = row.get("trend_state")
+                trend_evidence_refs_json = row.get("trend_evidence_refs_json")
+                trend_evidence_refs = []
+                if trend_evidence_refs_json:
+                    try:
+                        trend_evidence_refs = json.loads(trend_evidence_refs_json)
+                        if not isinstance(trend_evidence_refs, list):
+                            trend_evidence_refs = []
+                    except (json.JSONDecodeError, TypeError):
+                        logger.warning(f"Failed to parse trend_evidence_refs_json for subject {subject_id}")
+                        trend_evidence_refs = []
+
+                trend_source_as_of_ts = self._parse_timestamp(row.get("trend_source_as_of_ts"))
+
+                # Handle missing primitives: set to UNKNOWN if NULL
+                if risk_state is None:
+                    risk_state = "UNKNOWN"
+                    risk_evidence_refs = []
+                if trend_state is None:
+                    trend_state = "UNKNOWN"
+                    trend_evidence_refs = []
+
+                config_version = str(row.get("config_version", ""))
+                canonical_version = "v1"
+                subject_type = str(row.get("subject_type", "shopper"))
+
+                input_obj = ShopperHealthInput.new(
+                    tenant_id=str(row.get("tenant_id", tenant_id)),
+                    subject_id=subject_id,
+                    as_of_ts=as_of_ts_parsed,
+                    config_version=config_version,
+                    canonical_version=canonical_version,
+                    subject_type=subject_type,
+                    risk_state=risk_state,
+                    trend_state=trend_state,
+                    risk_evidence_refs=risk_evidence_refs,
+                    trend_evidence_refs=trend_evidence_refs,
+                    risk_source_as_of_ts=risk_source_as_of_ts,
+                    trend_source_as_of_ts=trend_source_as_of_ts,
+                )
+                inputs.append(input_obj)
+
+            logger.info(
+                f"Fetched {len(inputs)} shopper health input rows for tenant {tenant_id}",
+                extra={"correlation_id": ctx.correlation_id.value} if ctx.correlation_id else {},
+            )
+            return inputs
+
+        except Exception as e:
+            logger.error(
+                f"Error fetching shopper health inputs from {table_name}: {e}",
                 extra={"correlation_id": ctx.correlation_id.value} if ctx.correlation_id else {},
             )
             raise

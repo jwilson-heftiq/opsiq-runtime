@@ -6,6 +6,10 @@ from opsiq_runtime.domain.primitives.operational_risk.model import OperationalRi
 from opsiq_runtime.domain.primitives.shopper_frequency_trend.config import ShopperFrequencyTrendConfig
 from opsiq_runtime.domain.primitives.shopper_frequency_trend.evaluator import evaluate_shopper_frequency_trend
 from opsiq_runtime.domain.primitives.shopper_frequency_trend.model import ShopperFrequencyInput
+from opsiq_runtime.domain.primitives.shopper_health_classification.config import ShopperHealthConfig
+from opsiq_runtime.domain.primitives.shopper_health_classification.evaluator import evaluate_shopper_health_classification
+from opsiq_runtime.domain.primitives.shopper_health_classification.model import ShopperHealthInput
+from opsiq_runtime.domain.primitives.shopper_health_classification import rules
 
 
 def test_operational_risk_decision_includes_versions_and_evidence_refs():
@@ -49,4 +53,33 @@ def test_shopper_frequency_trend_decision_includes_versions_and_evidence_refs():
     assert decision.versions.canonical_version == "v1"
     assert decision.versions.config_version == "cfg123"
     assert decision.evidence_refs
+
+
+def test_shopper_health_classification_decision_includes_versions_and_evidence_refs():
+    """Test that shopper_health_classification primitive produces decisions with versions and evidence refs."""
+    cfg = ShopperHealthConfig(primitive_version="1.0.0", canonical_version="v1")
+    input_row = ShopperHealthInput.new(
+        tenant_id="t1",
+        subject_id="s1",
+        as_of_ts=datetime(2024, 1, 10, tzinfo=timezone.utc),
+        config_version="cfg123",
+        canonical_version="v1",
+        risk_state="NOT_AT_RISK",
+        trend_state="STABLE",
+        risk_evidence_refs=["evidence-risk-1"],
+        trend_evidence_refs=["evidence-trend-1"],
+    )
+    result = evaluate_shopper_health_classification(input_row, cfg)
+    decision = result.decision
+    assert decision.versions.primitive_version == "1.0.0"
+    assert decision.versions.canonical_version == "v1"
+    assert decision.versions.config_version == "cfg123"
+    assert decision.evidence_refs
+    # Verify decision state is one of the valid states
+    assert decision.state in (rules.URGENT, rules.WATCHLIST, rules.HEALTHY, rules.UNKNOWN)
+    # Verify confidence level
+    assert decision.confidence in ("HIGH", "MEDIUM", "LOW")
+    # Verify metrics include risk_state and trend_state
+    assert "risk_state" in decision.metrics
+    assert "trend_state" in decision.metrics
 

@@ -15,3 +15,8 @@ class ProvisioningError(Exception):
         self.ddl_file_path = ddl_file_path
         self.suggested_command = suggested_command
 
+
+class RunCancelledError(Exception):
+    """Raised when a run is cancelled."""
+    pass
+
