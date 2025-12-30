@@ -80,17 +80,21 @@ class DecisionsRepository:
         subject_id_filter: str | None = None,
         limit: int = 50,
         cursor: str | None = None,
+        primitive_name: str | None = None,
+        subject_type: str | None = None,
     ) -> DecisionListResponse:
         """
-        Get worklist of latest shopper_health_classification decisions per subject.
+        Get worklist of latest decisions per subject.
 
         Args:
             tenant_id: Tenant ID to filter by
-            state: Optional list of decision states to filter by (URGENT/WATCHLIST/HEALTHY/UNKNOWN)
+            state: Optional list of decision states to filter by
             confidence: Optional list of confidence levels to filter by (HIGH/MEDIUM/LOW)
             subject_id_filter: Optional substring match on subject_id
             limit: Maximum number of results (default 50, max 200)
             cursor: Optional pagination cursor
+            primitive_name: Optional primitive name to filter by (default: 'shopper_health_classification')
+            subject_type: Optional subject type to filter by (default: 'shopper')
 
         Returns:
             DecisionListResponse with items and next_cursor
@@ -104,10 +108,19 @@ class DecisionsRepository:
         # Build WHERE conditions
         conditions = [
             "tenant_id = ?",
-            "subject_type = 'shopper'",
-            "primitive_name = 'shopper_health_classification'",
         ]
         params: list[Any] = [tenant_id]
+        
+        # Default to shopper_health_classification for backward compatibility
+        if primitive_name is None:
+            primitive_name = "shopper_health_classification"
+        if subject_type is None:
+            subject_type = "shopper"
+        
+        conditions.append("subject_type = ?")
+        params.append(subject_type)
+        conditions.append("primitive_name = ?")
+        params.append(primitive_name)
 
         # Add cursor condition for keyset pagination
         if cursor_ts and cursor_subject_id:

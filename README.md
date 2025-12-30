@@ -1,6 +1,6 @@
 # OpsIQ Runtime
 
-Decision Intelligence Runtime walking skeleton implementing decision primitives (`operational_risk`, `shopper_frequency_trend`, `shopper_health_classification`) with hexagonal architecture (ports & adapters).
+Decision Intelligence Runtime walking skeleton implementing decision primitives (`operational_risk`, `shopper_frequency_trend`, `shopper_health_classification`, `order_line_fulfillment_risk`) with hexagonal architecture (ports & adapters).
 
 ## Quick start (local)
 - Python 3.13 recommended.
@@ -94,6 +94,11 @@ The Databricks adapters expect the following tables:
   - This primitive reads decision outputs from `operational_risk` and `shopper_frequency_trend` primitives stored in this table
   - Filters by `tenant_id`, `subject_type='shopper'`, and `primitive_name IN ('operational_risk','shopper_frequency_trend')`
 
+- `{prefix}gold_canonical_order_line_fulfillment_input_v1` (for `order_line_fulfillment_risk` primitive)
+  - Location: Catalog `opsiq_dev`, Schema `gold`
+  - Columns: `tenant_id`, `subject_type`, `subject_id`, `as_of_ts`, `need_by_date`, `open_quantity`, `projected_available_quantity`, `order_status`, `is_on_hold`, `release_shortage_qty`, `plant_shortage_qty`, `projected_onhand_qty_eod`, `supply_qty`, `demand_qty`, `partnum`, `customer_id`, `plant`, `warehouse`, `config_version`, `canonical_version`
+  - Note: When using this primitive, set `DATABRICKS_CATALOG=opsiq_dev` and `DATABRICKS_SCHEMA=gold` environment variables
+
 **Output Tables:**
 - `{prefix}gold_decision_output_v1` (shared by all primitives)
   - Columns: `tenant_id`, `subject_type`, `subject_id`, `primitive_name`, `primitive_version`, `canonical_version`, `config_version`, `as_of_ts`, `decision_state`, `confidence`, `drivers_json`, `metrics_json`, `evidence_refs_json`, `computed_at`, `valid_until`, `correlation_id`
@@ -119,6 +124,13 @@ uvicorn opsiq_runtime.app.main:app --host 0.0.0.0 --port 8080
 python -m opsiq_runtime.app.cli run --tenant price_chopper --primitive operational_risk --config cfg_v1
 ```
 
+**For `order_line_fulfillment_risk` primitive, set catalog and schema:**
+```bash
+export DATABRICKS_CATALOG=opsiq_dev
+export DATABRICKS_SCHEMA=gold
+python -m opsiq_runtime.app.cli run --tenant vmc_group --primitive order_line_fulfillment_risk --config cfg_v1
+```
+
 ### API Request Reference
 
 The `/run` endpoint accepts a JSON payload with the following fields:
@@ -126,7 +138,7 @@ The `/run` endpoint accepts a JSON payload with the following fields:
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `tenant_id` | string | **Yes** | Identifies the tenant/customer. Used to filter input data and partition output data. Example: `"price_chopper"` |
-| `primitive_name` | string | **Yes** | The decision primitive to execute. Supported: `"operational_risk"`, `"shopper_frequency_trend"`, `"shopper_health_classification"` |
+| `primitive_name` | string | **Yes** | The decision primitive to execute. Supported: `"operational_risk"`, `"shopper_frequency_trend"`, `"shopper_health_classification"`, `"order_line_fulfillment_risk"` |
 | `config_version` | string | **Yes** | Version of the configuration to use. Determines thresholds and rules. Example: `"cfg_v1"` |
 | `as_of_ts` | string (ISO 8601) | No | The point-in-time for evaluation. Defaults to current time if omitted. See details below. |
 | `correlation_id` | string | No | Unique identifier for this run, used for tracing and idempotency. Auto-generated if omitted. |
@@ -433,4 +445,82 @@ curl -X POST http://localhost:8080/run \
   "duration_ms": 45230
 }
 ```
+
+### order_line_fulfillment_risk
+
+Evaluates whether an order line is at risk of not being fulfilled on time based on projected available quantity versus open quantity.
+
+**Decision States:**
+- `AT_RISK`: Order line is on hold or projected available quantity is insufficient to fulfill open quantity
+- `NOT_AT_RISK`: Order line is closed, has no open quantity, or has sufficient projected supply
+- `UNKNOWN`: Missing required inputs (need_by_date, open_quantity, or projected_available_quantity)
+
+**Configuration:**
+- `closed_statuses` (default: `{"CLOSED", "CANCELLED"}`, env: `ORDER_LINE_CLOSED_STATUSES` - comma-separated list)
+
+**Input Table:** `gold_canonical_order_line_fulfillment_input_v1`
+
+**Evaluation Rules (priority-ordered):**
+1. If `need_by_date`, `open_quantity`, or `projected_available_quantity` is missing → `UNKNOWN` (driver: `MISSING_REQUIRED_INPUTS`)
+2. If `is_on_hold == True` → `AT_RISK` (driver: `ON_HOLD`)
+3. If `order_status` (uppercase) is in `closed_statuses` → `NOT_AT_RISK` (driver: `NOT_OPEN`)
+4. If `open_quantity <= 0` → `NOT_AT_RISK` (driver: `NO_OPEN_QTY`)
+5. If `projected_available_quantity < open_quantity` → `AT_RISK` (driver: `PROJECTED_SHORT`)
+6. Else → `NOT_AT_RISK` (driver: `SUFFICIENT_SUPPLY`)
+
+**Metrics:**
+- `need_by_date`: Target fulfillment date (ISO date string)
+- `open_quantity`: Quantity still needed to fulfill the order line
+- `projected_available_quantity`: Projected quantity available for fulfillment
+- `shortage_quantity`: Computed as `max(open_quantity - projected_available_quantity, 0)`
+- Optional: `release_shortage_qty`, `plant_shortage_qty`, `projected_onhand_qty_eod`, `supply_qty`, `demand_qty`
+
+**Evidence:**
+- `applied_rule_id`: Identifies which evaluation rule was applied
+- `closed_statuses`: List of statuses considered "closed"
+- Context fields (when available): `partnum`, `customer_id`, `plant`, `warehouse`
+
+**Example:**
+```bash
+python -m opsiq_runtime.app.cli run --tenant vmc_group --primitive order_line_fulfillment_risk --config cfg_v1
+```
+
+**Example API Request:**
+```bash
+curl -X POST http://localhost:8080/run \
+  -H "Content-Type: application/json" \
+  -d '{
+    "tenant_id": "vmc_group",
+    "primitive_name": "order_line_fulfillment_risk",
+    "config_version": "cfg_v1",
+    "as_of_ts": "2024-01-01T00:00:00Z",
+    "correlation_id": "abc-123"
+  }'
+```
+
+**Example Response:**
+```json
+{
+  "tenant_id": "vmc_group",
+  "primitive_name": "order_line_fulfillment_risk",
+  "primitive_version": "1.0.0",
+  "config_version": "cfg_v1",
+  "count": 125000,
+  "state_counts": {
+    "AT_RISK": 15000,
+    "NOT_AT_RISK": 108000,
+    "UNKNOWN": 2000
+  },
+  "duration_ms": 32100
+}
+```
+
+**Worklist Endpoint:**
+The runtime provides a dedicated worklist endpoint for order line fulfillment decisions:
+
+```bash
+curl "http://localhost:8080/v1/tenants/vmc_group/worklists/order-line-fulfillment?state=AT_RISK&limit=50"
+```
+
+This endpoint filters for `primitive_name="order_line_fulfillment_risk"` and `subject_type="order_line"`, returning the latest decision per order line with support for filtering by state, confidence, and subject_id substring matching.
 

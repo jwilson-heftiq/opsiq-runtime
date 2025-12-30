@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime
+from datetime import date, datetime
 from typing import Iterable
 
 from opsiq_runtime.adapters.databricks.client import DatabricksSqlClient
 from opsiq_runtime.application.run_context import RunContext
 from opsiq_runtime.domain.common.ids import CorrelationId
 from opsiq_runtime.domain.primitives.operational_risk.model import OperationalRiskInput
+from opsiq_runtime.domain.primitives.order_line_fulfillment_risk.model import OrderLineFulfillmentInput
 from opsiq_runtime.domain.primitives.shopper_frequency_trend.model import ShopperFrequencyInput
 from opsiq_runtime.domain.primitives.shopper_health_classification.model import ShopperHealthInput
 from opsiq_runtime.ports.inputs_repository import InputsRepository
@@ -59,6 +60,34 @@ class DatabricksInputsRepository(InputsRepository):
                         continue
                 logger.warning(f"Could not parse timestamp: {value}")
                 return None
+        return None
+
+    def _parse_date(self, value: str | date | datetime | None) -> date | None:
+        """Parse date value to date."""
+        if value is None:
+            return None
+        if isinstance(value, date):
+            return value
+        if isinstance(value, datetime):
+            return value.date()
+        if isinstance(value, str):
+            # Try ISO format first
+            try:
+                return date.fromisoformat(value)
+            except ValueError:
+                # Try datetime format and extract date
+                try:
+                    dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+                    return dt.date()
+                except ValueError:
+                    # Try other common date formats
+                    for fmt in ["%Y-%m-%d", "%Y/%m/%d", "%m/%d/%Y"]:
+                        try:
+                            return datetime.strptime(value, fmt).date()
+                        except ValueError:
+                            continue
+                    logger.warning(f"Could not parse date: {value}")
+                    return None
         return None
 
     def _compute_days_since_last_trip(self, last_trip_ts: datetime | None, as_of_ts: datetime) -> int | None:
@@ -444,6 +473,154 @@ class DatabricksInputsRepository(InputsRepository):
         except Exception as e:
             logger.error(
                 f"Error fetching shopper health inputs from {table_name}: {e}",
+                extra={"correlation_id": ctx.correlation_id.value} if ctx.correlation_id else {},
+            )
+            raise
+
+    def fetch_order_line_fulfillment_inputs(self, ctx: RunContext) -> Iterable[OrderLineFulfillmentInput]:
+        """
+        Fetch order line fulfillment inputs from Databricks table.
+
+        Filters by tenant_id (required).
+        Returns latest row per subject_id if multiple exist.
+        
+        Note: Table location is determined by DATABRICKS_CATALOG and DATABRICKS_SCHEMA
+        environment variables. For this primitive, set:
+        - DATABRICKS_CATALOG=opsiq_dev
+        - DATABRICKS_SCHEMA=gold
+        """
+        table_name = self._build_table_name_for_primitive("gold_canonical_order_line_fulfillment_input_v1")
+        tenant_id = str(ctx.tenant_id)
+
+        # Build SQL query
+        # Note: Table name must be string substitution (can't be parameterized)
+        # Use ? placeholder for tenant_id parameter
+        sql = f"""
+        SELECT
+            tenant_id,
+            subject_type,
+            subject_id,
+            as_of_ts,
+            need_by_date,
+            open_quantity,
+            projected_available_quantity,
+            order_status,
+            is_on_hold,
+            release_shortage_qty,
+            plant_shortage_qty,
+            projected_onhand_qty_eod,
+            supply_qty,
+            demand_qty,
+            partnum,
+            customer_id,
+            plant,
+            warehouse,
+            config_version,
+            canonical_version
+        FROM {table_name}
+        WHERE tenant_id = ?
+        ORDER BY subject_id, as_of_ts DESC
+        """
+
+        logger.info(
+            f"Fetching order line fulfillment inputs from {table_name} for tenant {tenant_id}",
+            extra={"correlation_id": ctx.correlation_id.value} if ctx.correlation_id else {},
+        )
+
+        try:
+            # databricks-sql-connector uses positional parameters with ?
+            rows = self.client.query(sql, params=[tenant_id])
+
+            # Group by subject_id and take latest as_of_ts (already sorted DESC)
+            seen_subjects = set()
+            inputs = []
+
+            for row in rows:
+                subject_id = str(row.get("subject_id", ""))
+                if subject_id in seen_subjects:
+                    continue  # Skip duplicates, taking first (latest as_of_ts)
+                seen_subjects.add(subject_id)
+
+                as_of_ts = self._parse_timestamp(row.get("as_of_ts"))
+                if as_of_ts is None:
+                    logger.warning(f"Skipping row with null as_of_ts for subject {subject_id}")
+                    continue
+
+                need_by_date = self._parse_date(row.get("need_by_date"))
+
+                # Parse numeric fields
+                def parse_float(value):
+                    if value is None:
+                        return None
+                    try:
+                        return float(value)
+                    except (ValueError, TypeError):
+                        return None
+
+                open_quantity = parse_float(row.get("open_quantity"))
+                projected_available_quantity = parse_float(row.get("projected_available_quantity"))
+                release_shortage_qty = parse_float(row.get("release_shortage_qty"))
+                plant_shortage_qty = parse_float(row.get("plant_shortage_qty"))
+                projected_onhand_qty_eod = parse_float(row.get("projected_onhand_qty_eod"))
+                supply_qty = parse_float(row.get("supply_qty"))
+                demand_qty = parse_float(row.get("demand_qty"))
+
+                # Parse boolean
+                is_on_hold = row.get("is_on_hold")
+                if is_on_hold is not None:
+                    if isinstance(is_on_hold, bool):
+                        pass  # Already boolean
+                    elif isinstance(is_on_hold, str):
+                        is_on_hold = is_on_hold.lower() in ("true", "1", "yes", "t")
+                    elif isinstance(is_on_hold, (int, float)):
+                        is_on_hold = bool(is_on_hold)
+                    else:
+                        is_on_hold = None
+
+                # Parse string fields
+                order_status = str(row.get("order_status")) if row.get("order_status") is not None else None
+                partnum = str(row.get("partnum")) if row.get("partnum") is not None else None
+                customer_id = str(row.get("customer_id")) if row.get("customer_id") is not None else None
+                plant = str(row.get("plant")) if row.get("plant") is not None else None
+                warehouse = str(row.get("warehouse")) if row.get("warehouse") is not None else None
+
+                config_version = str(row.get("config_version", ""))
+                canonical_version = str(row.get("canonical_version", "v1"))
+                subject_type = str(row.get("subject_type", "order_line"))
+
+                input_obj = OrderLineFulfillmentInput.new(
+                    tenant_id=str(row.get("tenant_id", tenant_id)),
+                    subject_id=subject_id,
+                    as_of_ts=as_of_ts,
+                    config_version=config_version,
+                    canonical_version=canonical_version,
+                    subject_type=subject_type,
+                    need_by_date=need_by_date,
+                    open_quantity=open_quantity,
+                    projected_available_quantity=projected_available_quantity,
+                    order_status=order_status,
+                    is_on_hold=is_on_hold,
+                    release_shortage_qty=release_shortage_qty,
+                    plant_shortage_qty=plant_shortage_qty,
+                    projected_onhand_qty_eod=projected_onhand_qty_eod,
+                    supply_qty=supply_qty,
+                    demand_qty=demand_qty,
+                    partnum=partnum,
+                    customer_id=customer_id,
+                    plant=plant,
+                    warehouse=warehouse,
+                )
+                inputs.append(input_obj)
+
+            logger.info(
+                f"Fetched {len(inputs)} order line fulfillment input rows for tenant {tenant_id}",
+                extra={"correlation_id": ctx.correlation_id.value} if ctx.correlation_id else {},
+            )
+            return inputs
+
+        except Exception as e:
+            logger.error(
+                f"Error fetching order line fulfillment inputs from {table_name}: {e}",
                 extra={"correlation_id": ctx.correlation_id.value} if ctx.correlation_id else {},
             )
             raise

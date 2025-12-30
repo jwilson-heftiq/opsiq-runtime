@@ -50,6 +50,40 @@ def get_shopper_health_worklist(
             subject_id_filter=subject_id,
             limit=limit,
             cursor=cursor,
+            primitive_name="shopper_health_classification",
+            subject_type="shopper",
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching worklist: {str(e)}")
+
+
+@router.get("/tenants/{tenant_id}/worklists/order-line-fulfillment", response_model=DecisionListResponse)
+def get_order_line_fulfillment_worklist(
+    tenant_id: str,
+    state: list[str] | None = Query(None, description="Filter by decision states (AT_RISK/NOT_AT_RISK/UNKNOWN)"),
+    confidence: list[str] | None = Query(None, description="Filter by confidence levels (HIGH/MEDIUM/LOW)"),
+    subject_id: str | None = Query(None, description="Substring match on subject_id"),
+    limit: int = Query(50, ge=1, le=200, description="Maximum number of results"),
+    cursor: str | None = Query(None, description="Pagination cursor"),
+    repository: DecisionsRepository = Depends(get_decisions_repository),
+) -> DecisionListResponse:
+    """
+    Get worklist of latest order line fulfillment risk decisions per subject.
+
+    Returns the latest decision per subject for order_line_fulfillment_risk primitive.
+    Supports filtering by state, confidence, and subject_id substring matching.
+    Uses keyset pagination based on computed_at and subject_id.
+    """
+    try:
+        return repository.get_worklist(
+            tenant_id=tenant_id,
+            state=state,
+            confidence=confidence,
+            subject_id_filter=subject_id,
+            limit=limit,
+            cursor=cursor,
+            primitive_name="order_line_fulfillment_risk",
+            subject_type="order_line",
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error fetching worklist: {str(e)}")

@@ -18,6 +18,8 @@ class Settings:
     default_decline_ratio_threshold: float = 1.5
     default_improve_ratio_threshold: float = 0.75
     default_max_reasonable_gap_days: int = 365
+    # Order line fulfillment risk defaults
+    default_order_line_closed_statuses: str = "CLOSED,CANCELLED"
     # Databricks settings
     databricks_server_hostname: Optional[str] = None
     databricks_http_path: Optional[str] = None
@@ -39,6 +41,7 @@ class Settings:
             default_decline_ratio_threshold=float(os.getenv("DEFAULT_DECLINE_RATIO_THRESHOLD", cls.default_decline_ratio_threshold)),
             default_improve_ratio_threshold=float(os.getenv("DEFAULT_IMPROVE_RATIO_THRESHOLD", cls.default_improve_ratio_threshold)),
             default_max_reasonable_gap_days=int(os.getenv("DEFAULT_MAX_REASONABLE_GAP_DAYS", cls.default_max_reasonable_gap_days)),
+            default_order_line_closed_statuses=os.getenv("ORDER_LINE_CLOSED_STATUSES", cls.default_order_line_closed_statuses),
             databricks_server_hostname=os.getenv("DATABRICKS_SERVER_HOSTNAME"),
             databricks_http_path=os.getenv("DATABRICKS_HTTP_PATH"),
             databricks_access_token=os.getenv("DATABRICKS_ACCESS_TOKEN"),
