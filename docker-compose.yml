@@ -14,6 +14,9 @@ services:
     volumes:
       # Mount source for development hot-reload
       - ./src:/app/src:ro
+      # Mount decision packs and tenant configs for development
+      - ./decision_packs:/app/decision_packs:ro
+      - ./tenants:/app/tenants:ro
       # Mount output directory if using file outputs
       - ./tmp/output:/tmp/opsiq-runtime-output
     profiles:
@@ -35,6 +38,8 @@ services:
       - .env
     volumes:
       - ./src:/app/src:ro
+      - ./decision_packs:/app/decision_packs:ro
+      - ./tenants:/app/tenants:ro
       - ./tmp/output:/tmp/opsiq-runtime-output
     profiles:
       - cli

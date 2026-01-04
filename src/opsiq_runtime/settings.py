@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from dataclasses import dataclass
 from typing import Optional
 
@@ -29,9 +30,24 @@ class Settings:
     databricks_warehouse_timeout_seconds: int = 30
     databricks_table_prefix: str = ""
     databricks_use_merge: bool = True
+    # Decision packs settings
+    packs_base_dir: str = ""
 
     @classmethod
     def from_env(cls) -> "Settings":
+        # Find repo root by looking for pyproject.toml
+        repo_root = None
+        current = Path(__file__).resolve()
+        for parent in current.parents:
+            if (parent / "pyproject.toml").exists():
+                repo_root = str(parent)
+                break
+        if repo_root is None:
+            # Fallback to current working directory
+            repo_root = str(Path.cwd())
+
+        packs_base_dir = os.getenv("OPSIQ_PACKS_BASE_DIR", repo_root)
+
         return cls(
             log_level=os.getenv("LOG_LEVEL", cls.log_level),
             default_at_risk_days=int(os.getenv("DEFAULT_AT_RISK_DAYS", cls.default_at_risk_days)),
@@ -52,6 +68,7 @@ class Settings:
             ),
             databricks_table_prefix=os.getenv("DATABRICKS_TABLE_PREFIX", cls.databricks_table_prefix),
             databricks_use_merge=os.getenv("DATABRICKS_USE_MERGE", "true").lower() in ("true", "1", "yes"),
+            packs_base_dir=packs_base_dir,
         )
 
 

@@ -1,0 +1,15 @@
+{
+  "tenant_id": "price_chopper",
+  "enabled_packs": [
+    {
+      "pack_id": "shopper_health_intelligence",
+      "pack_version": "1.0.0",
+      "enabled": true,
+      "config": {
+        "default_config_version": "cfg_v1",
+        "worklist_defaults": { "decision_state": ["URGENT", "WATCHLIST"] }
+      }
+    }
+  ]
+}
+

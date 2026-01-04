@@ -10,6 +10,7 @@ dependencies = [
   "uvicorn>=0.34.0",
   "pydantic>=2.10.0",
   "databricks-sql-connector>=3.0.0",
+  "jsonschema>=4.0.0",
 ]
 
 [project.optional-dependencies]

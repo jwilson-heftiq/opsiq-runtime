@@ -1,6 +1,6 @@
 # OpsIQ Runtime
 
-Decision Intelligence Runtime walking skeleton implementing decision primitives (`operational_risk`, `shopper_frequency_trend`, `shopper_health_classification`, `order_line_fulfillment_risk`) with hexagonal architecture (ports & adapters).
+Decision Intelligence Runtime walking skeleton implementing decision primitives (`operational_risk`, `shopper_frequency_trend`, `shopper_health_classification`, `order_line_fulfillment_risk`, `order_fulfillment_risk`, `customer_order_impact_risk`) with hexagonal architecture (ports & adapters).
 
 ## Quick start (local)
 - Python 3.13 recommended.
@@ -96,8 +96,14 @@ The Databricks adapters expect the following tables:
 
 - `{prefix}gold_canonical_order_line_fulfillment_input_v1` (for `order_line_fulfillment_risk` primitive)
   - Location: Catalog `opsiq_dev`, Schema `gold`
-  - Columns: `tenant_id`, `subject_type`, `subject_id`, `as_of_ts`, `need_by_date`, `open_quantity`, `projected_available_quantity`, `order_status`, `is_on_hold`, `release_shortage_qty`, `plant_shortage_qty`, `projected_onhand_qty_eod`, `supply_qty`, `demand_qty`, `partnum`, `customer_id`, `plant`, `warehouse`, `config_version`, `canonical_version`
-  - Note: When using this primitive, set `DATABRICKS_CATALOG=opsiq_dev` and `DATABRICKS_SCHEMA=gold` environment variables
+  - Columns: `tenant_id`, `subject_type`, `subject_id`, `as_of_ts`, `need_by_date`, `open_quantity`, `projected_available_quantity`, `order_status`, `is_on_hold`, `release_shortage_qty`, `plant_shortage_qty`, `projected_onhand_qty_eod`, `supply_qty`, `demand_qty`, `partnum`, `customer_id`, `ordernum`, `plant`, `warehouse`, `config_version`, `canonical_version`
+  - Note: `ordernum` and `customer_id` are required for aggregation primitives (`order_fulfillment_risk`, `customer_order_impact_risk`)
+
+- `{prefix}gold_decision_output_v1` (for `order_fulfillment_risk` and `customer_order_impact_risk` primitives - composite primitives that read from this table)
+  - These primitives read decision outputs from lower-level primitives stored in this table
+  - `order_fulfillment_risk`: Filters by `primitive_name='order_line_fulfillment_risk'`, `subject_type='order_line'`, groups by `ordernum` from `metrics_json`
+  - `customer_order_impact_risk`: Filters by `primitive_name='order_fulfillment_risk'`, `subject_type='order'`, groups by `customer_id` from `metrics_json`
+  - Note: When using these primitives, set `DATABRICKS_CATALOG=opsiq_dev` and `DATABRICKS_SCHEMA=gold` environment variables
 
 **Output Tables:**
 - `{prefix}gold_decision_output_v1` (shared by all primitives)
@@ -138,7 +144,7 @@ The `/run` endpoint accepts a JSON payload with the following fields:
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `tenant_id` | string | **Yes** | Identifies the tenant/customer. Used to filter input data and partition output data. Example: `"price_chopper"` |
-| `primitive_name` | string | **Yes** | The decision primitive to execute. Supported: `"operational_risk"`, `"shopper_frequency_trend"`, `"shopper_health_classification"`, `"order_line_fulfillment_risk"` |
+| `primitive_name` | string | **Yes** | The decision primitive to execute. Supported: `"operational_risk"`, `"shopper_frequency_trend"`, `"shopper_health_classification"`, `"order_line_fulfillment_risk"`, `"order_fulfillment_risk"`, `"customer_order_impact_risk"` |
 | `config_version` | string | **Yes** | Version of the configuration to use. Determines thresholds and rules. Example: `"cfg_v1"` |
 | `as_of_ts` | string (ISO 8601) | No | The point-in-time for evaluation. Defaults to current time if omitted. See details below. |
 | `correlation_id` | string | No | Unique identifier for this run, used for tracing and idempotency. Auto-generated if omitted. |
@@ -474,6 +480,8 @@ Evaluates whether an order line is at risk of not being fulfilled on time based 
 - `projected_available_quantity`: Projected quantity available for fulfillment
 - `shortage_quantity`: Computed as `max(open_quantity - projected_available_quantity, 0)`
 - Optional: `release_shortage_qty`, `plant_shortage_qty`, `projected_onhand_qty_eod`, `supply_qty`, `demand_qty`
+- `ordernum`: Order number (string or int) - required for aggregation
+- `customer_id`: Customer identifier (string) - required for aggregation
 
 **Evidence:**
 - `applied_rule_id`: Identifies which evaluation rule was applied
@@ -523,4 +531,229 @@ curl "http://localhost:8080/v1/tenants/vmc_group/worklists/order-line-fulfillmen
 ```
 
 This endpoint filters for `primitive_name="order_line_fulfillment_risk"` and `subject_type="order_line"`, returning the latest decision per order line with support for filtering by state, confidence, and subject_id substring matching.
+
+**Decision Bundle Endpoint:**
+Get detailed decision information for a specific order line:
+
+```bash
+curl "http://localhost:8080/v1/tenants/vmc_group/subjects/order_line/{subject_id}/decision-bundle"
+```
+
+Returns the primary decision and associated evidence for the order line.
+
+### order_fulfillment_risk
+
+Composite primitive that aggregates `order_line_fulfillment_risk` decisions to evaluate order-level risk.
+
+**Decision States:**
+- `AT_RISK`: Order has one or more order lines at risk
+- `NOT_AT_RISK`: All order lines are not at risk
+- `UNKNOWN`: No order lines found, or all order lines have unknown state
+
+**Configuration:**
+- No configuration parameters (uses defaults)
+
+**Input Source:** Reads from `gold_decision_output_v1` where `primitive_name='order_line_fulfillment_risk'` and `subject_type='order_line'`, grouped by `ordernum` from `metrics_json`
+
+**Evaluation Rules (priority-ordered):**
+1. If `order_line_count_total == 0` → `UNKNOWN` (driver: `NO_LINES_FOUND`)
+2. If `order_line_count_at_risk > 0` → `AT_RISK` (driver: `HAS_AT_RISK_LINES`)
+3. If `order_line_count_unknown == order_line_count_total` → `UNKNOWN` (driver: `ALL_LINES_UNKNOWN`)
+4. Else → `NOT_AT_RISK` (driver: `ALL_LINES_OK`)
+
+**Metrics:**
+- `order_line_count_total`: Total number of order lines in the order
+- `order_line_count_at_risk`: Number of order lines at risk
+- `order_line_count_unknown`: Number of order lines with unknown state
+- `order_line_count_not_at_risk`: Number of order lines not at risk
+- `at_risk_line_subject_ids`: List of order line subject IDs that are at risk (capped at 50)
+- `customer_id`: Customer identifier (string, nullable) - extracted from line decisions, used for customer rollup
+
+**Evidence:**
+- `applied_rule_id`: Identifies which evaluation rule was applied
+- `source_lines`: List of source order line references (capped at 50)
+- `rollup_counts`: Aggregated counts per order
+
+**Customer ID Resolution:**
+- When multiple order lines have different `customer_id` values for the same order, the most frequent non-null value is selected
+- If conflicts occur, a warning is logged and the chosen value is used
+
+**Example:**
+```bash
+python -m opsiq_runtime.app.cli run --tenant vmc_group --primitive order_fulfillment_risk --config cfg_v1
+```
+
+**Example API Request:**
+```bash
+curl -X POST http://localhost:8080/run \
+  -H "Content-Type: application/json" \
+  -d '{
+    "tenant_id": "vmc_group",
+    "primitive_name": "order_fulfillment_risk",
+    "config_version": "cfg_v1",
+    "as_of_ts": "2024-01-01T00:00:00Z",
+    "correlation_id": "abc-123"
+  }'
+```
+
+**Worklist Endpoint:**
+```bash
+curl "http://localhost:8080/v1/tenants/vmc_group/worklists/orders-at-risk?state=AT_RISK&limit=50"
+```
+
+This endpoint filters for `primitive_name="order_fulfillment_risk"` and `subject_type="order"`, returning the latest decision per order.
+
+**Decision Bundle Endpoint:**
+```bash
+curl "http://localhost:8080/v1/tenants/vmc_group/subjects/order/{order_id}/decision-bundle"
+```
+
+Returns the primary decision and associated evidence for the order, including drilldown to at-risk order lines.
+
+### customer_order_impact_risk
+
+Composite primitive that aggregates `order_fulfillment_risk` decisions to evaluate customer-level impact.
+
+**Decision States:**
+- `HIGH_IMPACT`: Customer has 5 or more orders at risk (configurable via `high_threshold`)
+- `MEDIUM_IMPACT`: Customer has 2-4 orders at risk (configurable via `medium_threshold`)
+- `LOW_IMPACT`: Customer has 1 order at risk, or no orders at risk
+- `UNKNOWN`: No orders found, or all orders have unknown state
+
+**Configuration:**
+- `high_threshold` (default: 5): Threshold for HIGH_IMPACT classification
+- `medium_threshold` (default: 2): Threshold for MEDIUM_IMPACT classification
+
+**Input Source:** Reads from `gold_decision_output_v1` where `primitive_name='order_fulfillment_risk'` and `subject_type='order'`, grouped by `customer_id` from `metrics_json`
+
+**Evaluation Rules (priority-ordered):**
+1. If `order_count_total == 0` → `UNKNOWN` (driver: `NO_ORDERS_FOUND`)
+2. If `order_count_at_risk >= high_threshold` → `HIGH_IMPACT` (driver: `HIGH_IMPACT`)
+3. If `order_count_at_risk >= medium_threshold` → `MEDIUM_IMPACT` (driver: `MEDIUM_IMPACT`)
+4. If `order_count_at_risk > 0` → `LOW_IMPACT` (driver: `LOW_IMPACT`)
+5. If `order_count_unknown == order_count_total` → `UNKNOWN` (driver: `ALL_ORDERS_UNKNOWN`)
+6. Else → `LOW_IMPACT` (driver: `NO_AT_RISK_ORDERS`)
+
+**Metrics:**
+- `order_count_total`: Total number of orders for the customer
+- `order_count_at_risk`: Number of orders at risk
+- `order_count_unknown`: Number of orders with unknown state
+- `at_risk_order_subject_ids`: List of order IDs that are at risk (capped at 100)
+
+**Evidence:**
+- `applied_rule_id`: Identifies which evaluation rule was applied
+- `source_orders`: List of source order references (capped at 100) - references order-level evidence_refs
+- `rollup_counts`: Aggregated counts per customer
+- `thresholds`: Configuration thresholds used for classification
+
+**Note:** This primitive sources from `order_fulfillment_risk` decisions (order-level), not directly from `order_line_fulfillment_risk` decisions. This creates a three-tier rollup hierarchy: order_line → order → customer.
+
+**Example:**
+```bash
+python -m opsiq_runtime.app.cli run --tenant vmc_group --primitive customer_order_impact_risk --config cfg_v1
+```
+
+**Example API Request:**
+```bash
+curl -X POST http://localhost:8080/run \
+  -H "Content-Type: application/json" \
+  -d '{
+    "tenant_id": "vmc_group",
+    "primitive_name": "customer_order_impact_risk",
+    "config_version": "cfg_v1",
+    "as_of_ts": "2024-01-01T00:00:00Z",
+    "correlation_id": "abc-123"
+  }'
+```
+
+**Worklist Endpoint:**
+```bash
+curl "http://localhost:8080/v1/tenants/vmc_group/worklists/customers-impacted?state=HIGH_IMPACT,MEDIUM_IMPACT&limit=50"
+```
+
+This endpoint filters for `primitive_name="customer_order_impact_risk"` and `subject_type="customer"`, returning the latest decision per customer.
+
+**Decision Bundle Endpoint:**
+```bash
+curl "http://localhost:8080/v1/tenants/vmc_group/subjects/customer/{customer_id}/decision-bundle"
+```
+
+Returns the primary decision and associated evidence for the customer, including drilldown to at-risk orders.
+
+## Decision Packs
+
+The OpsIQ platform uses a file-based Decision Pack registry system to manage which decision capabilities are available to each tenant. Packs define primitives, subjects, worklists, and onboarding requirements.
+
+### Pack Structure
+
+Decision packs are defined as JSON files in the `decision_packs/` directory:
+
+```
+decision_packs/
+├── _schemas/
+│   ├── decision_pack.schema.json          # Schema for pack definitions
+│   └── tenant_enablement.schema.json      # Schema for tenant enablement
+├── shopper_health_intelligence/
+│   └── 1.0.0/
+│       └── pack.json                      # Pack definition
+└── order_fulfillment_risk/
+    └── 1.0.0/
+        └── pack.json                      # Pack definition
+```
+
+Tenant enablement is configured in `tenants/{tenant_id}/packs.json`:
+
+```
+tenants/
+├── price_chopper/
+│   └── packs.json                         # Enabled packs for price_chopper
+└── vmc_group/
+    └── packs.json                         # Enabled packs for vmc_group
+```
+
+### Pack API Endpoints
+
+**List Enabled Packs for a Tenant:**
+```bash
+curl "http://localhost:8080/v1/tenants/price_chopper/decision-packs"
+```
+
+Returns a list of enabled packs with summary information including subjects, worklists, and primitives.
+
+**Get Pack Definition:**
+```bash
+curl "http://localhost:8080/v1/decision-packs/shopper_health_intelligence/1.0.0"
+```
+
+Returns the complete pack definition including all configuration, primitives, and onboarding checks.
+
+**Check Tenant Readiness:**
+```bash
+curl "http://localhost:8080/v1/tenants/price_chopper/readiness"
+```
+
+Runs onboarding checks (e.g., table existence) for all enabled packs and returns a readiness checklist with PASS/FAIL/WARN status.
+
+### Environment Configuration
+
+- `OPSIQ_PACKS_BASE_DIR` - Base directory for pack files (default: repository root)
+  - Set this if packs are located outside the repository
+  - Example: `export OPSIQ_PACKS_BASE_DIR=/opt/opsiq/packs`
+
+### Pack Validation
+
+Validate all pack JSON files against their schemas:
+
+```bash
+python scripts/validate_packs.py
+```
+
+This script scans all `pack.json` and tenant `packs.json` files and validates them against the JSON schemas, exiting with an error code if any files are invalid.
+
+### Pack Features
+
+- **JSON Schema Validation**: All pack definitions are validated against schemas in `decision_packs/_schemas/`
+- **Caching**: Pack definitions are cached in-memory with a 60-second TTL for performance
+- **Fail-Fast**: Invalid JSON or schema violations raise exceptions immediately
+- **Onboarding Checks**: Packs can define table/view existence checks that are validated via the readiness endpoint
 

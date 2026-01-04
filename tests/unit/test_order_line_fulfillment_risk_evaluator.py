@@ -19,6 +19,9 @@ def make_input(
     demand_qty: float | None = None,
     partnum: str | None = None,
     customer_id: str | None = None,
+    ordernum: str | int | None = None,
+    orderline: int | None = None,
+    orderrelnum: int | None = None,
     plant: str | None = None,
     warehouse: str | None = None,
 ) -> OrderLineFulfillmentInput:
@@ -41,6 +44,9 @@ def make_input(
         demand_qty=demand_qty,
         partnum=partnum,
         customer_id=customer_id,
+        ordernum=ordernum,
+        orderline=orderline,
+        orderrelnum=orderrelnum,
         plant=plant,
         warehouse=warehouse,
     )
@@ -355,3 +361,71 @@ def test_rule_priority_order():
     assert res.decision.state == rules.NOT_AT_RISK
     assert rules.DRIVER_NO_OPEN_QTY in res.decision.drivers
 
+
+
+
+def test_metrics_include_ordernum_and_customer_id():
+    """Test that metrics_json includes ordernum, orderline, orderrelnum, and customer_id for aggregation."""
+    cfg = OrderLineFulfillmentRiskConfig()
+    
+    # Test with ordernum as string and all optional fields
+    res = evaluate_order_line_fulfillment_risk(
+        make_input(
+            need_by_date=date(2024, 1, 15),
+            open_quantity=10.0,
+            projected_available_quantity=5.0,
+            ordernum="ORDER123",
+            orderline=9,
+            orderrelnum=1,
+            customer_id="CUST456",
+        ),
+        cfg,
+    )
+    assert "ordernum" in res.decision.metrics
+    assert res.decision.metrics["ordernum"] == "ORDER123"
+    assert "orderline" in res.decision.metrics
+    assert res.decision.metrics["orderline"] == 9
+    assert "orderrelnum" in res.decision.metrics
+    assert res.decision.metrics["orderrelnum"] == 1
+    assert "customer_id" in res.decision.metrics
+    assert res.decision.metrics["customer_id"] == "CUST456"
+    
+    # Test with ordernum as int
+    res = evaluate_order_line_fulfillment_risk(
+        make_input(
+            need_by_date=date(2024, 1, 15),
+            open_quantity=10.0,
+            projected_available_quantity=5.0,
+            ordernum=593515,
+            orderline=9,
+            orderrelnum=1,
+            customer_id="CUST456",
+        ),
+        cfg,
+    )
+    assert "ordernum" in res.decision.metrics
+    assert res.decision.metrics["ordernum"] == 593515
+    assert "orderline" in res.decision.metrics
+    assert res.decision.metrics["orderline"] == 9
+    assert "orderrelnum" in res.decision.metrics
+    assert res.decision.metrics["orderrelnum"] == 1
+    assert "customer_id" in res.decision.metrics
+    assert res.decision.metrics["customer_id"] == "CUST456"
+    
+    # Test that metrics don't include optional fields when None
+    res = evaluate_order_line_fulfillment_risk(
+        make_input(
+            need_by_date=date(2024, 1, 15),
+            open_quantity=10.0,
+            projected_available_quantity=5.0,
+            ordernum=None,
+            orderline=None,
+            orderrelnum=None,
+            customer_id=None,
+        ),
+        cfg,
+    )
+    assert "ordernum" not in res.decision.metrics
+    assert "orderline" not in res.decision.metrics
+    assert "orderrelnum" not in res.decision.metrics
+    assert "customer_id" not in res.decision.metrics

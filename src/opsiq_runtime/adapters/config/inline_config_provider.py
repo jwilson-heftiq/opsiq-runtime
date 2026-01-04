@@ -6,6 +6,8 @@ from typing import Optional, Union
 
 from opsiq_runtime.domain.primitives.operational_risk.config import OperationalRiskConfig
 from opsiq_runtime.domain.primitives.order_line_fulfillment_risk.config import OrderLineFulfillmentRiskConfig
+from opsiq_runtime.domain.primitives.order_fulfillment_risk.config import OrderRiskConfig
+from opsiq_runtime.domain.primitives.customer_order_impact_risk.config import CustomerImpactConfig
 from opsiq_runtime.domain.primitives.shopper_frequency_trend.config import ShopperFrequencyTrendConfig
 from opsiq_runtime.domain.primitives.shopper_health_classification.config import ShopperHealthConfig
 from opsiq_runtime.ports.config_provider import ConfigProvider
@@ -20,7 +22,7 @@ class InlineConfigProvider(ConfigProvider):
 
     def get_config(
         self, tenant_id: str, config_version: str, primitive_name: str | None = None
-    ) -> Union[OperationalRiskConfig, ShopperFrequencyTrendConfig, ShopperHealthConfig, OrderLineFulfillmentRiskConfig]:
+    ) -> Union[OperationalRiskConfig, ShopperFrequencyTrendConfig, ShopperHealthConfig, OrderLineFulfillmentRiskConfig, OrderRiskConfig, CustomerImpactConfig]:
         settings = get_settings()
         
         # Determine which primitive based on primitive_name
@@ -28,6 +30,10 @@ class InlineConfigProvider(ConfigProvider):
             closed_statuses_str = settings.default_order_line_closed_statuses
             closed_statuses = {s.strip().upper() for s in closed_statuses_str.split(",") if s.strip()}
             return OrderLineFulfillmentRiskConfig(closed_statuses=closed_statuses)
+        elif primitive_name == "order_fulfillment_risk":
+            return OrderRiskConfig()
+        elif primitive_name == "customer_order_impact_risk":
+            return CustomerImpactConfig()
         elif primitive_name == "shopper_health_classification":
             return ShopperHealthConfig()
         elif primitive_name == "shopper_frequency_trend":

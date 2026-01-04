@@ -9,7 +9,7 @@ from opsiq_runtime.application.errors import RunCancelledError
 from opsiq_runtime.application.registry import Registry
 from opsiq_runtime.application.run_context import RunContext
 from opsiq_runtime.application.runner import Runner
-from opsiq_runtime.app.api.routers import decisions_router, runs_router, worklists_router
+from opsiq_runtime.app.api.routers import decisions_router, packs_router, runs_router, worklists_router
 from opsiq_runtime.app.factory import create_adapters
 from opsiq_runtime.app.health import router as health_router
 from opsiq_runtime.app.job_manager import job_manager
@@ -22,6 +22,7 @@ app.include_router(health_router)
 app.include_router(worklists_router, prefix="/v1", tags=["worklists"])
 app.include_router(decisions_router, prefix="/v1", tags=["decisions"])
 app.include_router(runs_router, prefix="/v1", tags=["runs"])
+app.include_router(packs_router, prefix="/v1", tags=["packs"])
 
 registry = Registry()
 

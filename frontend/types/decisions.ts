@@ -12,7 +12,7 @@ export interface DecisionKey {
 }
 
 export interface DecisionListItem extends DecisionKey {
-  decision_state: "URGENT" | "WATCHLIST" | "HEALTHY" | "UNKNOWN"
+  decision_state: "URGENT" | "WATCHLIST" | "HEALTHY" | "UNKNOWN" | "AT_RISK" | "NOT_AT_RISK"
   confidence: "HIGH" | "MEDIUM" | "LOW"
   computed_at: string // ISO timestamp
   drivers: string[]
@@ -27,7 +27,7 @@ export interface DecisionListResponse {
 export interface DecisionDetail extends DecisionKey {
   canonical_version: string
   config_version: string
-  decision_state: "URGENT" | "WATCHLIST" | "HEALTHY" | "UNKNOWN"
+  decision_state: "URGENT" | "WATCHLIST" | "HEALTHY" | "UNKNOWN" | "AT_RISK" | "NOT_AT_RISK"
   confidence: "HIGH" | "MEDIUM" | "LOW"
   computed_at: string // ISO timestamp
   valid_until: string | null

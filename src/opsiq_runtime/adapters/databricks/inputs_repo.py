@@ -10,6 +10,8 @@ from opsiq_runtime.application.run_context import RunContext
 from opsiq_runtime.domain.common.ids import CorrelationId
 from opsiq_runtime.domain.primitives.operational_risk.model import OperationalRiskInput
 from opsiq_runtime.domain.primitives.order_line_fulfillment_risk.model import OrderLineFulfillmentInput
+from opsiq_runtime.domain.primitives.order_fulfillment_risk.model import OrderRiskInput, SourceLineRef
+from opsiq_runtime.domain.primitives.customer_order_impact_risk.model import CustomerImpactInput, SourceOrderRef
 from opsiq_runtime.domain.primitives.shopper_frequency_trend.model import ShopperFrequencyInput
 from opsiq_runtime.domain.primitives.shopper_health_classification.model import ShopperHealthInput
 from opsiq_runtime.ports.inputs_repository import InputsRepository
@@ -513,6 +515,9 @@ class DatabricksInputsRepository(InputsRepository):
             demand_qty,
             partnum,
             customer_id,
+            ordernum,
+            orderline,
+            orderrelnum,
             plant,
             warehouse,
             config_version,
@@ -581,6 +586,49 @@ class DatabricksInputsRepository(InputsRepository):
                 order_status = str(row.get("order_status")) if row.get("order_status") is not None else None
                 partnum = str(row.get("partnum")) if row.get("partnum") is not None else None
                 customer_id = str(row.get("customer_id")) if row.get("customer_id") is not None else None
+                # Parse ordernum (can be string or int)
+                ordernum_raw = row.get("ordernum")
+                ordernum = None
+                if ordernum_raw is not None:
+                    if isinstance(ordernum_raw, (int, float)):
+                        # If it's a number, keep as int if it's a whole number, otherwise convert to string
+                        if isinstance(ordernum_raw, float) and ordernum_raw.is_integer():
+                            ordernum = int(ordernum_raw)
+                        elif isinstance(ordernum_raw, int):
+                            ordernum = ordernum_raw
+                        else:
+                            ordernum = str(ordernum_raw)
+                    else:
+                        ordernum = str(ordernum_raw)
+                
+                # Parse orderline (should be int)
+                orderline_raw = row.get("orderline")
+                orderline = None
+                if orderline_raw is not None:
+                    try:
+                        orderline = int(orderline_raw)
+                    except (ValueError, TypeError):
+                        # If it's a float, try to convert to int if it's a whole number
+                        try:
+                            if isinstance(orderline_raw, float) and orderline_raw.is_integer():
+                                orderline = int(orderline_raw)
+                        except (ValueError, TypeError):
+                            orderline = None
+                
+                # Parse orderrelnum (should be int)
+                orderrelnum_raw = row.get("orderrelnum")
+                orderrelnum = None
+                if orderrelnum_raw is not None:
+                    try:
+                        orderrelnum = int(orderrelnum_raw)
+                    except (ValueError, TypeError):
+                        # If it's a float, try to convert to int if it's a whole number
+                        try:
+                            if isinstance(orderrelnum_raw, float) and orderrelnum_raw.is_integer():
+                                orderrelnum = int(orderrelnum_raw)
+                        except (ValueError, TypeError):
+                            orderrelnum = None
+                
                 plant = str(row.get("plant")) if row.get("plant") is not None else None
                 warehouse = str(row.get("warehouse")) if row.get("warehouse") is not None else None
 
@@ -607,6 +655,9 @@ class DatabricksInputsRepository(InputsRepository):
                     demand_qty=demand_qty,
                     partnum=partnum,
                     customer_id=customer_id,
+                    ordernum=ordernum,
+                    orderline=orderline,
+                    orderrelnum=orderrelnum,
                     plant=plant,
                     warehouse=warehouse,
                 )
@@ -635,3 +686,385 @@ class DatabricksInputsRepository(InputsRepository):
             parts.append(self.settings.databricks_schema)
         parts.append(table_name)
         return ".".join(parts)
+
+    def fetch_order_risk_inputs(self, ctx: RunContext) -> Iterable[OrderRiskInput]:
+        """
+        Fetch order risk inputs by aggregating order_line_fulfillment_risk decisions.
+        
+        Reads from gold_decision_output_v1, groups by ordernum from metrics_json,
+        and aggregates counts per order.
+        """
+        table_name = self._build_table_name_for_primitive("gold_decision_output_v1")
+        tenant_id = str(ctx.tenant_id)
+        as_of_ts = ctx.as_of_ts
+        
+        # Build SQL query to fetch latest order_line decisions per line
+        sql = f"""
+        WITH ranked_decisions AS (
+            SELECT
+                tenant_id,
+                subject_type,
+                subject_id,
+                primitive_name,
+                decision_state,
+                metrics_json,
+                evidence_refs_json,
+                as_of_ts,
+                config_version,
+                ROW_NUMBER() OVER (
+                    PARTITION BY subject_id
+                    ORDER BY 
+                        CASE WHEN as_of_ts = ? THEN 0 ELSE 1 END,
+                        as_of_ts DESC
+                ) as rn
+            FROM {table_name}
+            WHERE tenant_id = ?
+                AND subject_type = 'order_line'
+                AND primitive_name = 'order_line_fulfillment_risk'
+                AND (? IS NULL OR as_of_ts <= ?)
+        )
+        SELECT
+            tenant_id,
+            subject_id,
+            decision_state,
+            metrics_json,
+            evidence_refs_json,
+            as_of_ts,
+            config_version
+        FROM ranked_decisions
+        WHERE rn = 1
+        ORDER BY subject_id
+        """
+        
+        logger.info(
+            f"Fetching order risk inputs from {table_name} for tenant {tenant_id}",
+            extra={"correlation_id": ctx.correlation_id.value} if ctx.correlation_id else {},
+        )
+        
+        try:
+            as_of_ts_str = as_of_ts.isoformat() if as_of_ts else None
+            rows = self.client.query(sql, params=[as_of_ts_str, tenant_id, as_of_ts_str, as_of_ts_str])
+            
+            # Group by ordernum (from metrics_json)
+            orders_dict: dict[str, dict] = {}
+            
+            for row in rows:
+                subject_id = str(row.get("subject_id", ""))
+                if not subject_id:
+                    continue
+                
+                decision_state = str(row.get("decision_state", ""))
+                metrics_json_str = row.get("metrics_json")
+                evidence_refs_json_str = row.get("evidence_refs_json")
+                as_of_ts_parsed = self._parse_timestamp(row.get("as_of_ts"))
+                config_version = str(row.get("config_version", ""))
+                
+                if not metrics_json_str:
+                    logger.warning(f"Skipping row with null metrics_json for subject {subject_id}")
+                    continue
+                
+                # Parse metrics_json to extract ordernum
+                try:
+                    metrics = json.loads(metrics_json_str)
+                except (json.JSONDecodeError, TypeError):
+                    logger.warning(f"Failed to parse metrics_json for subject {subject_id}")
+                    continue
+                
+                ordernum = metrics.get("ordernum")
+                if ordernum is None:
+                    logger.warning(f"Skipping row with null ordernum in metrics_json for subject {subject_id}")
+                    continue
+                
+                # Normalize ordernum to string for grouping
+                ordernum_key = str(ordernum)
+                
+                # Parse evidence_refs_json
+                evidence_refs = []
+                if evidence_refs_json_str:
+                    try:
+                        evidence_refs = json.loads(evidence_refs_json_str)
+                        if not isinstance(evidence_refs, list):
+                            evidence_refs = []
+                    except (json.JSONDecodeError, TypeError):
+                        logger.warning(f"Failed to parse evidence_refs_json for subject {subject_id}")
+                        evidence_refs = []
+                
+                # Extract customer_id from metrics
+                customer_id = metrics.get("customer_id")
+                customer_id_str = str(customer_id) if customer_id is not None else None
+                
+                # Initialize order dict if needed
+                if ordernum_key not in orders_dict:
+                    orders_dict[ordernum_key] = {
+                        "tenant_id": str(row.get("tenant_id", tenant_id)),
+                        "ordernum": ordernum_key,
+                        "as_of_ts": as_of_ts_parsed,
+                        "config_version": config_version,
+                        "customer_ids": [],  # Track all customer_ids for conflict resolution
+                        "lines": [],
+                    }
+                else:
+                    # Update as_of_ts to latest
+                    if as_of_ts_parsed and (orders_dict[ordernum_key]["as_of_ts"] is None or 
+                                           as_of_ts_parsed > orders_dict[ordernum_key]["as_of_ts"]):
+                        orders_dict[ordernum_key]["as_of_ts"] = as_of_ts_parsed
+                
+                # Track customer_id if present
+                if customer_id_str:
+                    orders_dict[ordernum_key]["customer_ids"].append(customer_id_str)
+                
+                # Add line info
+                orders_dict[ordernum_key]["lines"].append({
+                    "line_subject_id": subject_id,
+                    "decision_state": decision_state,
+                    "evidence_refs": evidence_refs,
+                })
+            
+            # Build OrderRiskInput objects
+            inputs = []
+            for ordernum_key, order_data in orders_dict.items():
+                if order_data["as_of_ts"] is None:
+                    logger.warning(f"Skipping order {ordernum_key} with null as_of_ts")
+                    continue
+                
+                lines = order_data["lines"]
+                total = len(lines)
+                at_risk = sum(1 for line in lines if line["decision_state"] == "AT_RISK")
+                unknown = sum(1 for line in lines if line["decision_state"] == "UNKNOWN")
+                not_at_risk = sum(1 for line in lines if line["decision_state"] == "NOT_AT_RISK")
+                
+                # Resolve customer_id conflicts: pick most frequent non-null value
+                customer_id = None
+                customer_ids = order_data.get("customer_ids", [])
+                if customer_ids:
+                    from collections import Counter
+                    customer_id_counts = Counter(customer_ids)
+                    # Get most frequent customer_id
+                    most_common = customer_id_counts.most_common(1)[0]
+                    customer_id = most_common[0]
+                    # Log warning if there are conflicting customer_ids
+                    if len(customer_id_counts) > 1:
+                        logger.warning(
+                            f"Order {ordernum_key} has conflicting customer_ids: {dict(customer_id_counts)}. "
+                            f"Using most frequent: {customer_id}",
+                            extra={"correlation_id": ctx.correlation_id.value} if ctx.correlation_id else {},
+                        )
+                
+                # Build at_risk_line_subject_ids (cap at 50)
+                at_risk_line_subject_ids = [line["line_subject_id"] for line in lines if line["decision_state"] == "AT_RISK"][:50]
+                
+                # Build source_line_refs (cap at 50)
+                source_line_refs = [
+                    SourceLineRef(
+                        line_subject_id=line["line_subject_id"],
+                        decision_state=line["decision_state"],
+                        evidence_refs=line["evidence_refs"],
+                    )
+                    for line in lines[:50]
+                ]
+                
+                input_obj = OrderRiskInput.new(
+                    tenant_id=order_data["tenant_id"],
+                    subject_id=ordernum_key,
+                    as_of_ts=order_data["as_of_ts"],
+                    config_version=order_data["config_version"],
+                    canonical_version="v1",
+                    subject_type="order",
+                    customer_id=customer_id,
+                    order_line_count_total=total,
+                    order_line_count_at_risk=at_risk,
+                    order_line_count_unknown=unknown,
+                    order_line_count_not_at_risk=not_at_risk,
+                    at_risk_line_subject_ids=at_risk_line_subject_ids,
+                    source_line_refs=source_line_refs,
+                )
+                inputs.append(input_obj)
+            
+            logger.info(
+                f"Fetched {len(inputs)} order risk input rows for tenant {tenant_id}",
+                extra={"correlation_id": ctx.correlation_id.value} if ctx.correlation_id else {},
+            )
+            return inputs
+            
+        except Exception as e:
+            logger.error(
+                f"Error fetching order risk inputs from {table_name}: {e}",
+                extra={"correlation_id": ctx.correlation_id.value} if ctx.correlation_id else {},
+            )
+            raise
+
+    def fetch_customer_impact_inputs(self, ctx: RunContext) -> Iterable[CustomerImpactInput]:
+        """
+        Fetch customer impact inputs by aggregating order_fulfillment_risk decisions.
+        
+        Reads from gold_decision_output_v1, groups by customer_id from metrics_json,
+        and aggregates counts per customer.
+        """
+        table_name = self._build_table_name_for_primitive("gold_decision_output_v1")
+        tenant_id = str(ctx.tenant_id)
+        as_of_ts = ctx.as_of_ts
+        
+        # Build SQL query to fetch latest order decisions per order
+        sql = f"""
+        WITH ranked_decisions AS (
+            SELECT
+                tenant_id,
+                subject_type,
+                subject_id,
+                primitive_name,
+                decision_state,
+                metrics_json,
+                evidence_refs_json,
+                as_of_ts,
+                config_version,
+                ROW_NUMBER() OVER (
+                    PARTITION BY subject_id
+                    ORDER BY 
+                        CASE WHEN as_of_ts = ? THEN 0 ELSE 1 END,
+                        as_of_ts DESC
+                ) as rn
+            FROM {table_name}
+            WHERE tenant_id = ?
+                AND subject_type = 'order'
+                AND primitive_name = 'order_fulfillment_risk'
+                AND (? IS NULL OR as_of_ts <= ?)
+        )
+        SELECT
+            tenant_id,
+            subject_id,
+            decision_state,
+            metrics_json,
+            evidence_refs_json,
+            as_of_ts,
+            config_version
+        FROM ranked_decisions
+        WHERE rn = 1
+        ORDER BY subject_id
+        """
+        
+        logger.info(
+            f"Fetching customer impact inputs from {table_name} for tenant {tenant_id}",
+            extra={"correlation_id": ctx.correlation_id.value} if ctx.correlation_id else {},
+        )
+        
+        try:
+            as_of_ts_str = as_of_ts.isoformat() if as_of_ts else None
+            rows = self.client.query(sql, params=[as_of_ts_str, tenant_id, as_of_ts_str, as_of_ts_str])
+            
+            # Group by customer_id (from metrics_json)
+            customers_dict: dict[str, dict] = {}
+            
+            for row in rows:
+                subject_id = str(row.get("subject_id", ""))
+                if not subject_id:
+                    continue
+                
+                decision_state = str(row.get("decision_state", ""))
+                metrics_json_str = row.get("metrics_json")
+                evidence_refs_json_str = row.get("evidence_refs_json")
+                as_of_ts_parsed = self._parse_timestamp(row.get("as_of_ts"))
+                config_version = str(row.get("config_version", ""))
+                
+                if not metrics_json_str:
+                    logger.warning(f"Skipping row with null metrics_json for subject {subject_id}")
+                    continue
+                
+                # Parse metrics_json to extract customer_id
+                try:
+                    metrics = json.loads(metrics_json_str)
+                except (json.JSONDecodeError, TypeError):
+                    logger.warning(f"Failed to parse metrics_json for subject {subject_id}")
+                    continue
+                
+                customer_id = metrics.get("customer_id")
+                if customer_id is None:
+                    logger.warning(f"Skipping row with null customer_id in metrics_json for subject {subject_id}")
+                    continue
+                
+                customer_id_key = str(customer_id)
+                
+                # Parse evidence_refs_json
+                evidence_refs = []
+                if evidence_refs_json_str:
+                    try:
+                        evidence_refs = json.loads(evidence_refs_json_str)
+                        if not isinstance(evidence_refs, list):
+                            evidence_refs = []
+                    except (json.JSONDecodeError, TypeError):
+                        logger.warning(f"Failed to parse evidence_refs_json for subject {subject_id}")
+                        evidence_refs = []
+                
+                # Initialize customer dict if needed
+                if customer_id_key not in customers_dict:
+                    customers_dict[customer_id_key] = {
+                        "tenant_id": str(row.get("tenant_id", tenant_id)),
+                        "customer_id": customer_id_key,
+                        "as_of_ts": as_of_ts_parsed,
+                        "config_version": config_version,
+                        "orders": [],
+                    }
+                else:
+                    # Update as_of_ts to latest
+                    if as_of_ts_parsed and (customers_dict[customer_id_key]["as_of_ts"] is None or 
+                                           as_of_ts_parsed > customers_dict[customer_id_key]["as_of_ts"]):
+                        customers_dict[customer_id_key]["as_of_ts"] = as_of_ts_parsed
+                
+                # Add order info (subject_id is the ordernum)
+                customers_dict[customer_id_key]["orders"].append({
+                    "order_subject_id": subject_id,
+                    "decision_state": decision_state,
+                    "evidence_refs": evidence_refs,
+                })
+            
+            # Build CustomerImpactInput objects
+            inputs = []
+            for customer_id_key, customer_data in customers_dict.items():
+                if customer_data["as_of_ts"] is None:
+                    logger.warning(f"Skipping customer {customer_id_key} with null as_of_ts")
+                    continue
+                
+                orders = customer_data["orders"]
+                total = len(orders)
+                at_risk = sum(1 for order in orders if order["decision_state"] == "AT_RISK")
+                unknown = sum(1 for order in orders if order["decision_state"] == "UNKNOWN")
+                
+                # Build at_risk_order_subject_ids (cap at 100)
+                at_risk_order_subject_ids = [order["order_subject_id"] for order in orders if order["decision_state"] == "AT_RISK"][:100]
+                
+                # Build source_order_refs (cap at 100)
+                source_order_refs = [
+                    SourceOrderRef(
+                        order_subject_id=order["order_subject_id"],
+                        decision_state=order["decision_state"],
+                        evidence_refs=order["evidence_refs"],
+                    )
+                    for order in orders[:100]
+                ]
+                
+                input_obj = CustomerImpactInput.new(
+                    tenant_id=customer_data["tenant_id"],
+                    subject_id=customer_id_key,
+                    as_of_ts=customer_data["as_of_ts"],
+                    config_version=customer_data["config_version"],
+                    canonical_version="v1",
+                    subject_type="customer",
+                    order_count_total=total,
+                    order_count_at_risk=at_risk,
+                    order_count_unknown=unknown,
+                    at_risk_order_subject_ids=at_risk_order_subject_ids,
+                    source_order_refs=source_order_refs,
+                )
+                inputs.append(input_obj)
+            
+            logger.info(
+                f"Fetched {len(inputs)} customer impact input rows for tenant {tenant_id}",
+                extra={"correlation_id": ctx.correlation_id.value} if ctx.correlation_id else {},
+            )
+            return inputs
+            
+        except Exception as e:
+            logger.error(
+                f"Error fetching customer impact inputs from {table_name}: {e}",
+                extra={"correlation_id": ctx.correlation_id.value} if ctx.correlation_id else {},
+            )
+            raise

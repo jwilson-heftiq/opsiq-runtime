@@ -1,0 +1,56 @@
+{
+  "pack_id": "shopper_health_intelligence",
+  "pack_version": "1.0.0",
+  "name": "Shopper Health Intelligence",
+  "description": "Lapse risk + cadence trend composed into an actionable shopper health classification with evidence.",
+  "status": "ACTIVE",
+  "tags": ["retail", "pos", "retention"],
+
+  "subjects": [
+    {
+      "subject_type": "shopper",
+      "default_worklist": {
+        "title": "Shoppers Needing Attention",
+        "primitive_name": "shopper_health_classification",
+        "default_filters": { "decision_state": ["URGENT", "WATCHLIST"] },
+        "ui_route": "/{tenantId}/shopper-health"
+      }
+    }
+  ],
+
+  "primitives": [
+    {
+      "primitive_name": "operational_risk",
+      "primitive_version": "1.0.0",
+      "canonical_version": "v1",
+      "kind": "primitive",
+      "depends_on": { "canonical_inputs": ["gold_canonical_shopper_recency_input_v1"], "primitives": [] }
+    },
+    {
+      "primitive_name": "shopper_frequency_trend",
+      "primitive_version": "1.0.0",
+      "canonical_version": "v1",
+      "kind": "primitive",
+      "depends_on": { "canonical_inputs": ["gold_canonical_shopper_frequency_input_v1"], "primitives": [] }
+    },
+    {
+      "primitive_name": "shopper_health_classification",
+      "primitive_version": "1.0.0",
+      "canonical_version": "v1",
+      "kind": "composite",
+      "depends_on": { "canonical_inputs": [], "primitives": ["operational_risk", "shopper_frequency_trend"] }
+    }
+  ],
+
+  "activation": {
+    "eventbridge_enabled": true,
+    "event_types": ["opsiq.decision_ready"],
+    "recommended_targets": ["worklist"]
+  },
+
+  "onboarding_checks": [
+    { "type": "table_exists", "table": "gold_canonical_shopper_recency_input_v1", "severity": "BLOCKER" },
+    { "type": "table_exists", "table": "gold_canonical_shopper_frequency_input_v1", "severity": "BLOCKER" }
+  ]
+}
+

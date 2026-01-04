@@ -295,6 +295,465 @@ class DecisionsRepository:
 
         return DecisionBundle(composite=composite, components=components, evidence=evidence)
 
+    def get_order_line_decision_bundle(
+        self,
+        tenant_id: str,
+        subject_id: str,
+        as_of_ts: datetime | None = None,
+        include_evidence: bool = True,
+    ) -> DecisionBundle:
+        """
+        Get decision bundle for an order line subject.
+
+        For order lines, we return the primary decision as composite and empty components.
+
+        Args:
+            tenant_id: Tenant ID
+            subject_id: Subject ID
+            as_of_ts: Optional as_of timestamp for the decision (if None, gets latest)
+            include_evidence: Whether to include evidence (default True)
+
+        Returns:
+            DecisionBundle with composite=primary, components={}, and evidence
+        """
+        decision_table = self._build_table_name(self.decision_table_name)
+        evidence_table = self._build_table_name(self.evidence_table_name)
+
+        # Fetch primary decision
+        conditions = [
+            "tenant_id = ?",
+            "subject_type = 'order_line'",
+            "subject_id = ?",
+            "primitive_name = 'order_line_fulfillment_risk'",
+        ]
+        params: list[Any] = [tenant_id, subject_id]
+
+        if as_of_ts:
+            conditions.append("as_of_ts = ?")
+            params.append(as_of_ts.isoformat())
+            order_by = "computed_at DESC"
+        else:
+            order_by = "computed_at DESC, as_of_ts DESC"
+
+        where_clause = " AND ".join(conditions)
+
+        sql = f"""
+        SELECT
+            tenant_id,
+            subject_type,
+            subject_id,
+            primitive_name,
+            primitive_version,
+            canonical_version,
+            config_version,
+            as_of_ts,
+            decision_state,
+            confidence,
+            drivers_json,
+            metrics_json,
+            evidence_refs_json,
+            computed_at,
+            valid_until,
+            correlation_id
+        FROM {decision_table}
+        WHERE {where_clause}
+        ORDER BY {order_by}
+        LIMIT 1
+        """
+
+        try:
+            rows = self.client.query(sql, params)
+        except Exception as e:
+            logger.error(f"Error fetching order line decision: {e}")
+            raise
+
+        if not rows:
+            raise ValueError(
+                f"No decision found for tenant_id={tenant_id}, subject_id={subject_id}, subject_type=order_line"
+            )
+
+        primary = self._row_to_decision_detail(rows[0])
+
+        # Fetch evidence if requested
+        evidence: dict[str, list[EvidenceRecord]] = {}
+        if include_evidence:
+            evidence_ids = set(primary.evidence_refs)
+            if evidence_ids:
+                evidence_by_primitive: dict[str, list[EvidenceRecord]] = {
+                    "order_line_fulfillment_risk": [],
+                }
+
+                evidence_ids_list = list(evidence_ids)
+                placeholders = ",".join(["?"] * len(evidence_ids_list))
+                evidence_sql = f"""
+                SELECT
+                    tenant_id,
+                    evidence_id,
+                    primitive_name,
+                    primitive_version,
+                    as_of_ts,
+                    computed_at,
+                    evidence_json
+                FROM {evidence_table}
+                WHERE tenant_id = ?
+                    AND evidence_id IN ({placeholders})
+                """
+
+                evidence_params: list[Any] = [tenant_id]
+                evidence_params.extend(evidence_ids_list)
+
+                try:
+                    evidence_rows = self.client.query(evidence_sql, evidence_params)
+                except Exception as e:
+                    logger.error(f"Error fetching evidence: {e}")
+                    raise
+
+                for row in evidence_rows:
+                    try:
+                        evidence_id = str(row["evidence_id"])
+                        primitive_name = str(row["primitive_name"])
+
+                        as_of_ts_ev = row.get("as_of_ts")
+                        if isinstance(as_of_ts_ev, str):
+                            as_of_ts_ev = datetime.fromisoformat(as_of_ts_ev.replace("Z", "+00:00"))
+                        elif not isinstance(as_of_ts_ev, datetime):
+                            logger.warning(f"Invalid as_of_ts format in evidence: {as_of_ts_ev}")
+                            continue
+
+                        computed_at_ev = row.get("computed_at")
+                        if isinstance(computed_at_ev, str):
+                            computed_at_ev = datetime.fromisoformat(computed_at_ev.replace("Z", "+00:00"))
+                        elif not isinstance(computed_at_ev, datetime):
+                            logger.warning(f"Invalid computed_at format in evidence: {computed_at_ev}")
+                            continue
+
+                        evidence_json = self._parse_json_field(row.get("evidence_json"), {})
+
+                        record = EvidenceRecord(
+                            tenant_id=str(row["tenant_id"]),
+                            evidence_id=evidence_id,
+                            primitive_name=primitive_name,
+                            primitive_version=str(row["primitive_version"]),
+                            as_of_ts=as_of_ts_ev,
+                            computed_at=computed_at_ev,
+                            evidence=evidence_json,
+                        )
+
+                        if primitive_name == "order_line_fulfillment_risk":
+                            evidence_by_primitive["order_line_fulfillment_risk"].append(record)
+                    except Exception as e:
+                        logger.warning(f"Error parsing evidence record: {e}")
+                        continue
+
+                evidence = {k: v for k, v in evidence_by_primitive.items() if v}
+
+        # Return as DecisionBundle with composite=primary, components={}
+        return DecisionBundle(composite=primary, components={}, evidence=evidence)
+
+    def get_order_decision_bundle(
+        self,
+        tenant_id: str,
+        order_id: str,
+        as_of_ts: datetime | None = None,
+        include_evidence: bool = True,
+    ) -> DecisionBundle:
+        """
+        Get decision bundle for an order subject.
+
+        Args:
+            tenant_id: Tenant ID
+            order_id: Order ID
+            as_of_ts: Optional as_of timestamp for the decision (if None, gets latest)
+            include_evidence: Whether to include evidence (default True)
+
+        Returns:
+            DecisionBundle with composite=primary, components={}, and evidence
+        """
+        decision_table = self._build_table_name(self.decision_table_name)
+        evidence_table = self._build_table_name(self.evidence_table_name)
+
+        # Fetch primary decision
+        conditions = [
+            "tenant_id = ?",
+            "subject_type = 'order'",
+            "subject_id = ?",
+            "primitive_name = 'order_fulfillment_risk'",
+        ]
+        params: list[Any] = [tenant_id, order_id]
+
+        if as_of_ts:
+            conditions.append("as_of_ts = ?")
+            params.append(as_of_ts.isoformat())
+            order_by = "computed_at DESC"
+        else:
+            order_by = "computed_at DESC, as_of_ts DESC"
+
+        where_clause = " AND ".join(conditions)
+
+        sql = f"""
+        SELECT
+            tenant_id,
+            subject_type,
+            subject_id,
+            primitive_name,
+            primitive_version,
+            canonical_version,
+            config_version,
+            as_of_ts,
+            decision_state,
+            confidence,
+            drivers_json,
+            metrics_json,
+            evidence_refs_json,
+            computed_at,
+            valid_until,
+            correlation_id
+        FROM {decision_table}
+        WHERE {where_clause}
+        ORDER BY {order_by}
+        LIMIT 1
+        """
+
+        try:
+            rows = self.client.query(sql, params)
+        except Exception as e:
+            logger.error(f"Error fetching order decision: {e}")
+            raise
+
+        if not rows:
+            raise ValueError(
+                f"No decision found for tenant_id={tenant_id}, subject_id={order_id}, subject_type=order"
+            )
+
+        primary = self._row_to_decision_detail(rows[0])
+
+        # Fetch evidence if requested
+        evidence: dict[str, list[EvidenceRecord]] = {}
+        if include_evidence:
+            evidence_ids = set(primary.evidence_refs)
+            if evidence_ids:
+                evidence_by_primitive: dict[str, list[EvidenceRecord]] = {
+                    "order_fulfillment_risk": [],
+                }
+
+                evidence_ids_list = list(evidence_ids)
+                placeholders = ",".join(["?"] * len(evidence_ids_list))
+                evidence_sql = f"""
+                SELECT
+                    tenant_id,
+                    evidence_id,
+                    primitive_name,
+                    primitive_version,
+                    as_of_ts,
+                    computed_at,
+                    evidence_json
+                FROM {evidence_table}
+                WHERE tenant_id = ?
+                    AND evidence_id IN ({placeholders})
+                """
+
+                evidence_params: list[Any] = [tenant_id]
+                evidence_params.extend(evidence_ids_list)
+
+                try:
+                    evidence_rows = self.client.query(evidence_sql, evidence_params)
+                except Exception as e:
+                    logger.error(f"Error fetching evidence: {e}")
+                    raise
+
+                for row in evidence_rows:
+                    try:
+                        evidence_id = str(row["evidence_id"])
+                        primitive_name = str(row["primitive_name"])
+
+                        as_of_ts_ev = row.get("as_of_ts")
+                        if isinstance(as_of_ts_ev, str):
+                            as_of_ts_ev = datetime.fromisoformat(as_of_ts_ev.replace("Z", "+00:00"))
+                        elif not isinstance(as_of_ts_ev, datetime):
+                            logger.warning(f"Invalid as_of_ts format in evidence: {as_of_ts_ev}")
+                            continue
+
+                        computed_at_ev = row.get("computed_at")
+                        if isinstance(computed_at_ev, str):
+                            computed_at_ev = datetime.fromisoformat(computed_at_ev.replace("Z", "+00:00"))
+                        elif not isinstance(computed_at_ev, datetime):
+                            logger.warning(f"Invalid computed_at format in evidence: {computed_at_ev}")
+                            continue
+
+                        evidence_json = self._parse_json_field(row.get("evidence_json"), {})
+
+                        record = EvidenceRecord(
+                            tenant_id=str(row["tenant_id"]),
+                            evidence_id=evidence_id,
+                            primitive_name=primitive_name,
+                            primitive_version=str(row["primitive_version"]),
+                            as_of_ts=as_of_ts_ev,
+                            computed_at=computed_at_ev,
+                            evidence=evidence_json,
+                        )
+
+                        if primitive_name == "order_fulfillment_risk":
+                            evidence_by_primitive["order_fulfillment_risk"].append(record)
+                    except Exception as e:
+                        logger.warning(f"Error parsing evidence record: {e}")
+                        continue
+
+                evidence = {k: v for k, v in evidence_by_primitive.items() if v}
+
+        return DecisionBundle(composite=primary, components={}, evidence=evidence)
+
+    def get_customer_decision_bundle(
+        self,
+        tenant_id: str,
+        customer_id: str,
+        as_of_ts: datetime | None = None,
+        include_evidence: bool = True,
+    ) -> DecisionBundle:
+        """
+        Get decision bundle for a customer subject.
+
+        Args:
+            tenant_id: Tenant ID
+            customer_id: Customer ID
+            as_of_ts: Optional as_of timestamp for the decision (if None, gets latest)
+            include_evidence: Whether to include evidence (default True)
+
+        Returns:
+            DecisionBundle with composite=primary, components={}, and evidence
+        """
+        decision_table = self._build_table_name(self.decision_table_name)
+        evidence_table = self._build_table_name(self.evidence_table_name)
+
+        # Fetch primary decision
+        conditions = [
+            "tenant_id = ?",
+            "subject_type = 'customer'",
+            "subject_id = ?",
+            "primitive_name = 'customer_order_impact_risk'",
+        ]
+        params: list[Any] = [tenant_id, customer_id]
+
+        if as_of_ts:
+            conditions.append("as_of_ts = ?")
+            params.append(as_of_ts.isoformat())
+            order_by = "computed_at DESC"
+        else:
+            order_by = "computed_at DESC, as_of_ts DESC"
+
+        where_clause = " AND ".join(conditions)
+
+        sql = f"""
+        SELECT
+            tenant_id,
+            subject_type,
+            subject_id,
+            primitive_name,
+            primitive_version,
+            canonical_version,
+            config_version,
+            as_of_ts,
+            decision_state,
+            confidence,
+            drivers_json,
+            metrics_json,
+            evidence_refs_json,
+            computed_at,
+            valid_until,
+            correlation_id
+        FROM {decision_table}
+        WHERE {where_clause}
+        ORDER BY {order_by}
+        LIMIT 1
+        """
+
+        try:
+            rows = self.client.query(sql, params)
+        except Exception as e:
+            logger.error(f"Error fetching customer decision: {e}")
+            raise
+
+        if not rows:
+            raise ValueError(
+                f"No decision found for tenant_id={tenant_id}, subject_id={customer_id}, subject_type=customer"
+            )
+
+        primary = self._row_to_decision_detail(rows[0])
+
+        # Fetch evidence if requested
+        evidence: dict[str, list[EvidenceRecord]] = {}
+        if include_evidence:
+            evidence_ids = set(primary.evidence_refs)
+            if evidence_ids:
+                evidence_by_primitive: dict[str, list[EvidenceRecord]] = {
+                    "customer_order_impact_risk": [],
+                }
+
+                evidence_ids_list = list(evidence_ids)
+                placeholders = ",".join(["?"] * len(evidence_ids_list))
+                evidence_sql = f"""
+                SELECT
+                    tenant_id,
+                    evidence_id,
+                    primitive_name,
+                    primitive_version,
+                    as_of_ts,
+                    computed_at,
+                    evidence_json
+                FROM {evidence_table}
+                WHERE tenant_id = ?
+                    AND evidence_id IN ({placeholders})
+                """
+
+                evidence_params: list[Any] = [tenant_id]
+                evidence_params.extend(evidence_ids_list)
+
+                try:
+                    evidence_rows = self.client.query(evidence_sql, evidence_params)
+                except Exception as e:
+                    logger.error(f"Error fetching evidence: {e}")
+                    raise
+
+                for row in evidence_rows:
+                    try:
+                        evidence_id = str(row["evidence_id"])
+                        primitive_name = str(row["primitive_name"])
+
+                        as_of_ts_ev = row.get("as_of_ts")
+                        if isinstance(as_of_ts_ev, str):
+                            as_of_ts_ev = datetime.fromisoformat(as_of_ts_ev.replace("Z", "+00:00"))
+                        elif not isinstance(as_of_ts_ev, datetime):
+                            logger.warning(f"Invalid as_of_ts format in evidence: {as_of_ts_ev}")
+                            continue
+
+                        computed_at_ev = row.get("computed_at")
+                        if isinstance(computed_at_ev, str):
+                            computed_at_ev = datetime.fromisoformat(computed_at_ev.replace("Z", "+00:00"))
+                        elif not isinstance(computed_at_ev, datetime):
+                            logger.warning(f"Invalid computed_at format in evidence: {computed_at_ev}")
+                            continue
+
+                        evidence_json = self._parse_json_field(row.get("evidence_json"), {})
+
+                        record = EvidenceRecord(
+                            tenant_id=str(row["tenant_id"]),
+                            evidence_id=evidence_id,
+                            primitive_name=primitive_name,
+                            primitive_version=str(row["primitive_version"]),
+                            as_of_ts=as_of_ts_ev,
+                            computed_at=computed_at_ev,
+                            evidence=evidence_json,
+                        )
+
+                        if primitive_name == "customer_order_impact_risk":
+                            evidence_by_primitive["customer_order_impact_risk"].append(record)
+                    except Exception as e:
+                        logger.warning(f"Error parsing evidence record: {e}")
+                        continue
+
+                evidence = {k: v for k, v in evidence_by_primitive.items() if v}
+
+        return DecisionBundle(composite=primary, components={}, evidence=evidence)
+
     def _fetch_composite_decision(
         self,
         table_name: str,

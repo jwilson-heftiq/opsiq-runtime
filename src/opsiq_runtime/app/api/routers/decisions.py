@@ -84,3 +84,90 @@ def get_decision_history(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error fetching decision history: {str(e)}")
 
+
+@router.get("/tenants/{tenant_id}/subjects/order_line/{subject_id}/decision-bundle", response_model=DecisionBundle)
+def get_order_line_decision_bundle(
+    tenant_id: str,
+    subject_id: str,
+    as_of_ts: datetime | None = Query(None, description="ISO timestamp for as_of_ts filter (if not provided, uses latest)"),
+    include_evidence: bool = Query(True, description="Whether to include evidence records"),
+    repository: DecisionsRepository = Depends(get_decisions_repository),
+) -> DecisionBundle:
+    """
+    Get decision bundle for an order line subject including primary decision and evidence.
+
+    Returns:
+    - composite: The latest order_line_fulfillment_risk decision (or at specified as_of_ts)
+    - components: Empty dict (order lines don't have composite structure)
+    - evidence: Evidence records for order_line_fulfillment_risk (if include_evidence=true)
+    """
+    try:
+        return repository.get_order_line_decision_bundle(
+            tenant_id=tenant_id,
+            subject_id=subject_id,
+            as_of_ts=as_of_ts,
+            include_evidence=include_evidence,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching decision bundle: {str(e)}")
+
+
+
+@router.get("/tenants/{tenant_id}/subjects/order/{order_id}/decision-bundle", response_model=DecisionBundle)
+def get_order_decision_bundle(
+    tenant_id: str,
+    order_id: str,
+    as_of_ts: datetime | None = Query(None, description="ISO timestamp for as_of_ts filter (if not provided, uses latest)"),
+    include_evidence: bool = Query(True, description="Whether to include evidence records"),
+    repository: DecisionsRepository = Depends(get_decisions_repository),
+) -> DecisionBundle:
+    """
+    Get decision bundle for an order subject including primary decision and evidence.
+
+    Returns:
+    - composite: The latest order_fulfillment_risk decision (or at specified as_of_ts)
+    - components: Empty dict (orders don't have composite structure)
+    - evidence: Evidence records for order_fulfillment_risk (if include_evidence=true)
+    """
+    try:
+        return repository.get_order_decision_bundle(
+            tenant_id=tenant_id,
+            order_id=order_id,
+            as_of_ts=as_of_ts,
+            include_evidence=include_evidence,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching decision bundle: {str(e)}")
+
+
+@router.get("/tenants/{tenant_id}/subjects/customer/{customer_id}/decision-bundle", response_model=DecisionBundle)
+def get_customer_decision_bundle(
+    tenant_id: str,
+    customer_id: str,
+    as_of_ts: datetime | None = Query(None, description="ISO timestamp for as_of_ts filter (if not provided, uses latest)"),
+    include_evidence: bool = Query(True, description="Whether to include evidence records"),
+    repository: DecisionsRepository = Depends(get_decisions_repository),
+) -> DecisionBundle:
+    """
+    Get decision bundle for a customer subject including primary decision and evidence.
+
+    Returns:
+    - composite: The latest customer_order_impact_risk decision (or at specified as_of_ts)
+    - components: Empty dict (customers don't have composite structure)
+    - evidence: Evidence records for customer_order_impact_risk (if include_evidence=true)
+    """
+    try:
+        return repository.get_customer_decision_bundle(
+            tenant_id=tenant_id,
+            customer_id=customer_id,
+            as_of_ts=as_of_ts,
+            include_evidence=include_evidence,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching decision bundle: {str(e)}")

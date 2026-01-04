@@ -1,0 +1,96 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://opsiq.dev/schemas/decision_pack.schema.json",
+  "title": "DecisionPackDefinition",
+  "type": "object",
+  "required": ["pack_id", "pack_version", "name", "status", "subjects", "primitives"],
+  "properties": {
+    "pack_id": { "type": "string", "pattern": "^[a-z0-9_]+$" },
+    "pack_version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$" },
+    "name": { "type": "string" },
+    "description": { "type": "string" },
+    "status": { "type": "string", "enum": ["ACTIVE", "DEPRECATED", "INTERNAL"] },
+    "tags": { "type": "array", "items": { "type": "string" }, "default": [] },
+
+    "subjects": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["subject_type", "default_worklist"],
+        "properties": {
+          "subject_type": { "type": "string" },
+          "default_worklist": {
+            "type": "object",
+            "required": ["title", "primitive_name", "ui_route"],
+            "properties": {
+              "title": { "type": "string" },
+              "primitive_name": { "type": "string" },
+              "default_filters": {
+                "type": "object",
+                "additionalProperties": true,
+                "default": {}
+              },
+              "ui_route": { "type": "string" }
+            },
+            "additionalProperties": false
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+
+    "primitives": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["primitive_name", "primitive_version", "canonical_version", "kind", "depends_on"],
+        "properties": {
+          "primitive_name": { "type": "string" },
+          "primitive_version": { "type": "string" },
+          "canonical_version": { "type": "string" },
+          "kind": { "type": "string", "enum": ["primitive", "composite"] },
+          "depends_on": {
+            "type": "object",
+            "required": ["canonical_inputs", "primitives"],
+            "properties": {
+              "canonical_inputs": { "type": "array", "items": { "type": "string" }, "default": [] },
+              "primitives": { "type": "array", "items": { "type": "string" }, "default": [] }
+            },
+            "additionalProperties": false
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+
+    "activation": {
+      "type": "object",
+      "properties": {
+        "eventbridge_enabled": { "type": "boolean", "default": false },
+        "event_types": { "type": "array", "items": { "type": "string" }, "default": [] },
+        "recommended_targets": { "type": "array", "items": { "type": "string" }, "default": [] }
+      },
+      "additionalProperties": false
+    },
+
+    "onboarding_checks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["type", "severity"],
+        "properties": {
+          "type": { "type": "string", "enum": ["table_exists", "view_exists", "custom"] },
+          "table": { "type": "string" },
+          "severity": { "type": "string", "enum": ["BLOCKER", "WARN", "INFO"] },
+          "message": { "type": "string" }
+        },
+        "additionalProperties": true
+      },
+      "default": []
+    }
+  },
+  "additionalProperties": false
+}
+

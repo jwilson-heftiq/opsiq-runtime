@@ -1,0 +1,73 @@
+{
+  "pack_id": "order_fulfillment_risk",
+  "pack_version": "1.0.0",
+  "name": "Order Fulfillment Risk",
+  "description": "Flags order lines at risk of missing need-by due to projected part shortages, with evidence.",
+  "status": "ACTIVE",
+  "tags": ["manufacturing", "epicor", "fulfillment"],
+
+  "subjects": [
+    {
+      "subject_type": "order",
+      "default_worklist": {
+        "title": "Orders at Risk",
+        "primitive_name": "order_fulfillment_risk",
+        "default_filters": { "decision_state": ["AT_RISK"] },
+        "ui_route": "/{tenantId}/order-fulfillment/orders"
+      }
+    },
+    {
+      "subject_type": "order_line",
+      "default_worklist": {
+        "title": "Order Lines At Risk",
+        "primitive_name": "order_line_fulfillment_risk",
+        "default_filters": { "decision_state": ["AT_RISK"] },
+        "ui_route": "/{tenantId}/order-fulfillment/order-lines"
+      }
+    },
+    {
+      "subject_type": "customer",
+      "default_worklist": {
+        "title": "Customers Impacted",
+        "primitive_name": "customer_order_impact_risk",
+        "default_filters": { "decision_state": ["HIGH_IMPACT", "MEDIUM_IMPACT"] },
+        "ui_route": "/{tenantId}/order-fulfillment/customers"
+      }
+    }
+  ],
+
+  "primitives": [
+    {
+      "primitive_name": "order_line_fulfillment_risk",
+      "primitive_version": "1.0.0",
+      "canonical_version": "v1",
+      "kind": "primitive",
+      "depends_on": { "canonical_inputs": ["gold_canonical_order_line_fulfillment_input_v1"], "primitives": [] }
+    },
+    {
+      "primitive_name": "order_fulfillment_risk",
+      "primitive_version": "1.0.0",
+      "canonical_version": "v1",
+      "kind": "composite",
+      "depends_on": { "canonical_inputs": [], "primitives": ["order_line_fulfillment_risk"] }
+    },
+    {
+      "primitive_name": "customer_order_impact_risk",
+      "primitive_version": "1.0.0",
+      "canonical_version": "v1",
+      "kind": "composite",
+      "depends_on": { "canonical_inputs": [], "primitives": ["order_fulfillment_risk"] }
+    }
+  ],
+
+  "activation": {
+    "eventbridge_enabled": true,
+    "event_types": ["opsiq.decision_ready"],
+    "recommended_targets": ["worklist"]
+  },
+
+  "onboarding_checks": [
+    { "type": "table_exists", "table": "gold_canonical_order_line_fulfillment_input_v1", "severity": "BLOCKER" }
+  ]
+}
+

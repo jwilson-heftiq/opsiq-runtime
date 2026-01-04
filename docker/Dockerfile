@@ -12,6 +12,9 @@ ENV PYTHONUNBUFFERED=1 \
 WORKDIR /app
 COPY --from=build /usr/local /usr/local
 COPY src ./src
+COPY pyproject.toml ./
+COPY decision_packs ./decision_packs
+COPY tenants ./tenants
 COPY docker/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 EXPOSE 8080

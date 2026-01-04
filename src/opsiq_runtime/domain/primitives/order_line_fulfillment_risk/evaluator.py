@@ -95,7 +95,7 @@ def evaluate_order_line_fulfillment_risk(
         )
 
     # Build metrics
-    metrics: dict[str, float | str] = {
+    metrics: dict[str, float | str | int] = {
         "open_quantity": float(input_row.open_quantity or 0.0),
         "projected_available_quantity": float(input_row.projected_available_quantity or 0.0),
         "shortage_quantity": float(shortage_quantity),
@@ -112,6 +112,15 @@ def evaluate_order_line_fulfillment_risk(
         metrics["supply_qty"] = float(input_row.supply_qty)
     if input_row.demand_qty is not None:
         metrics["demand_qty"] = float(input_row.demand_qty)
+    # Include ordernum, orderline, orderrelnum, and customer_id for aggregation and traceability
+    if input_row.ordernum is not None:
+        metrics["ordernum"] = input_row.ordernum
+    if input_row.orderline is not None:
+        metrics["orderline"] = input_row.orderline
+    if input_row.orderrelnum is not None:
+        metrics["orderrelnum"] = input_row.orderrelnum
+    if input_row.customer_id:
+        metrics["customer_id"] = input_row.customer_id
 
     # Build evidence references
     evidence_references: dict[str, Any] = {

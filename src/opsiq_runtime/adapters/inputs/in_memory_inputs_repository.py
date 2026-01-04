@@ -6,6 +6,10 @@ from typing import Iterable, List, Optional
 from opsiq_runtime.application.run_context import RunContext
 from opsiq_runtime.domain.primitives.operational_risk.model import OperationalRiskInput
 from opsiq_runtime.domain.primitives.shopper_frequency_trend.model import ShopperFrequencyInput
+from opsiq_runtime.domain.primitives.order_fulfillment_risk.model import OrderRiskInput
+from opsiq_runtime.domain.primitives.customer_order_impact_risk.model import CustomerImpactInput
+from opsiq_runtime.domain.primitives.shopper_health_classification.model import ShopperHealthInput
+from opsiq_runtime.domain.primitives.order_line_fulfillment_risk.model import OrderLineFulfillmentInput
 from opsiq_runtime.ports.inputs_repository import InputsRepository
 
 
@@ -48,4 +52,20 @@ class InMemoryInputsRepository(InputsRepository):
                 recent_gap_days=5.0,
             )
         ]
+
+    def fetch_shopper_health_inputs(self, ctx: RunContext) -> Iterable[ShopperHealthInput]:
+        # Stub implementation for unit tests
+        return []
+
+    def fetch_order_line_fulfillment_inputs(self, ctx: RunContext) -> Iterable[OrderLineFulfillmentInput]:
+        # Stub implementation for unit tests
+        return []
+
+    def fetch_order_risk_inputs(self, ctx: RunContext) -> Iterable[OrderRiskInput]:
+        # Stub implementation for unit tests
+        return []
+
+    def fetch_customer_impact_inputs(self, ctx: RunContext) -> Iterable[CustomerImpactInput]:
+        # Stub implementation for unit tests
+        return []
 

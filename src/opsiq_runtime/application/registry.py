@@ -5,6 +5,8 @@ from typing import Any, Callable, Dict, Tuple
 from opsiq_runtime.application.errors import PrimitiveVersionMismatch, UnknownPrimitiveError
 from opsiq_runtime.domain.primitives.operational_risk.evaluator import evaluate_operational_risk
 from opsiq_runtime.domain.primitives.order_line_fulfillment_risk.evaluator import evaluate_order_line_fulfillment_risk
+from opsiq_runtime.domain.primitives.order_fulfillment_risk.evaluator import evaluate_order_fulfillment_risk
+from opsiq_runtime.domain.primitives.customer_order_impact_risk.evaluator import evaluate_customer_order_impact_risk
 from opsiq_runtime.domain.primitives.shopper_frequency_trend.evaluator import evaluate_shopper_frequency_trend
 from opsiq_runtime.domain.primitives.shopper_health_classification.evaluator import evaluate_shopper_health_classification
 
@@ -19,6 +21,8 @@ class Registry:
         self.register("shopper_frequency_trend", "1.0.0", evaluate_shopper_frequency_trend, "fetch_shopper_frequency_inputs")
         self.register("shopper_health_classification", "1.0.0", evaluate_shopper_health_classification, "fetch_shopper_health_inputs")
         self.register("order_line_fulfillment_risk", "1.0.0", evaluate_order_line_fulfillment_risk, "fetch_order_line_fulfillment_inputs")
+        self.register("order_fulfillment_risk", "1.0.0", evaluate_order_fulfillment_risk, "fetch_order_risk_inputs")
+        self.register("customer_order_impact_risk", "1.0.0", evaluate_customer_order_impact_risk, "fetch_customer_impact_inputs")
 
     def register(
         self, primitive_name: str, primitive_version: str, fn: EvaluatorFn, input_fetch_method: str

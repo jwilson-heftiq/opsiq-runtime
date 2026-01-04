@@ -25,6 +25,9 @@ class OrderLineFulfillmentInput:
     demand_qty: Optional[float]
     partnum: Optional[str]
     customer_id: Optional[str]
+    ordernum: Optional[str | int]
+    orderline: Optional[int]
+    orderrelnum: Optional[int]
     plant: Optional[str]
     warehouse: Optional[str]
     canonical_version: str
@@ -50,6 +53,9 @@ class OrderLineFulfillmentInput:
         demand_qty: Optional[float] = None,
         partnum: Optional[str] = None,
         customer_id: Optional[str] = None,
+        ordernum: Optional[str | int] = None,
+        orderline: Optional[int] = None,
+        orderrelnum: Optional[int] = None,
         plant: Optional[str] = None,
         warehouse: Optional[str] = None,
     ) -> "OrderLineFulfillmentInput":
@@ -70,6 +76,9 @@ class OrderLineFulfillmentInput:
             demand_qty=demand_qty,
             partnum=partnum,
             customer_id=customer_id,
+            ordernum=ordernum,
+            orderline=orderline,
+            orderrelnum=orderrelnum,
             plant=plant,
             warehouse=warehouse,
             canonical_version=canonical_version,
