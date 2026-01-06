@@ -37,14 +37,11 @@ def make_input(
     return input_obj, cfg
 
 
-def test_unknown_when_no_orders_found():
-    """Test UNKNOWN when total == 0 (Rule 1)."""
+def test_skip_emission_when_no_orders_found():
+    """Test that no emission occurs when total == 0 (sparse emission)."""
     input_obj, cfg = make_input(order_count_total=0)
     res = evaluate_customer_order_impact_risk(input_obj, cfg)
-    assert res.decision.state == rules.UNKNOWN
-    assert res.decision.confidence == "LOW"
-    assert rules.DRIVER_NO_ORDERS_FOUND in res.decision.drivers
-    assert rules.RULE_UNKNOWN_NO_ORDERS_FOUND in res.evidence_set.evidence[0].rule_ids
+    assert res is None
 
 
 def test_high_impact_when_at_risk_above_high_threshold():
@@ -120,8 +117,8 @@ def test_low_impact_when_at_risk_below_medium_threshold():
     assert rules.RULE_LOW_IMPACT in res.evidence_set.evidence[0].rule_ids
 
 
-def test_unknown_when_all_orders_unknown():
-    """Test UNKNOWN when unknown == total (Rule 5)."""
+def test_skip_emission_when_all_orders_unknown():
+    """Test that no emission occurs when all orders are unknown but no at-risk orders (sparse emission)."""
     input_obj, cfg = make_input(
         order_count_total=5,
         order_count_at_risk=0,
@@ -130,14 +127,11 @@ def test_unknown_when_all_orders_unknown():
         medium_threshold=2,
     )
     res = evaluate_customer_order_impact_risk(input_obj, cfg)
-    assert res.decision.state == rules.UNKNOWN
-    assert res.decision.confidence == "LOW"
-    assert rules.DRIVER_ALL_ORDERS_UNKNOWN in res.decision.drivers
-    assert rules.RULE_UNKNOWN_ALL_ORDERS_UNKNOWN in res.evidence_set.evidence[0].rule_ids
+    assert res is None
 
 
-def test_low_impact_when_no_at_risk_orders():
-    """Test LOW_IMPACT when at_risk == 0 (Rule 6)."""
+def test_skip_emission_when_no_at_risk_orders():
+    """Test that no emission occurs when at_risk == 0 (sparse emission)."""
     input_obj, cfg = make_input(
         order_count_total=5,
         order_count_at_risk=0,
@@ -146,10 +140,21 @@ def test_low_impact_when_no_at_risk_orders():
         medium_threshold=2,
     )
     res = evaluate_customer_order_impact_risk(input_obj, cfg)
-    assert res.decision.state == rules.LOW_IMPACT
-    assert res.decision.confidence == "MEDIUM"
-    assert rules.DRIVER_NO_AT_RISK_ORDERS in res.decision.drivers
-    assert rules.RULE_LOW_IMPACT_NO_AT_RISK in res.evidence_set.evidence[0].rule_ids
+    assert res is None
+
+
+def test_skip_emission_when_empty_at_risk_order_ids():
+    """Test that no emission occurs when at_risk_order_subject_ids is empty (sparse emission)."""
+    input_obj, cfg = make_input(
+        order_count_total=5,
+        order_count_at_risk=0,
+        order_count_unknown=0,
+        at_risk_order_subject_ids=[],  # Explicitly empty list
+        high_threshold=5,
+        medium_threshold=2,
+    )
+    res = evaluate_customer_order_impact_risk(input_obj, cfg)
+    assert res is None
 
 
 def test_metrics_include_counts_and_at_risk_order_ids():
@@ -229,11 +234,10 @@ def test_source_orders_capped_at_100():
 
 def test_rule_priority_order():
     """Test that rules are evaluated in priority order."""
-    # Rule 1: total == 0 should take precedence
-    input_obj, cfg = make_input(order_count_total=0, order_count_at_risk=1)
+    # When total == 0 (which implies at_risk == 0), should skip emission (sparse emission)
+    input_obj, cfg = make_input(order_count_total=0, order_count_at_risk=0)
     res = evaluate_customer_order_impact_risk(input_obj, cfg)
-    assert res.decision.state == rules.UNKNOWN
-    assert rules.DRIVER_NO_ORDERS_FOUND in res.decision.drivers
+    assert res is None
     
     # Rule 2: high threshold should take precedence
     input_obj, cfg = make_input(
@@ -270,13 +274,12 @@ def test_rule_priority_order():
     assert res.decision.state == rules.LOW_IMPACT
     assert rules.DRIVER_LOW_IMPACT in res.decision.drivers
     
-    # Rule 5: all unknown should take precedence over Rule 6
+    # Rule 5: all unknown with no at-risk orders should skip emission (sparse emission)
     input_obj, cfg = make_input(
         order_count_total=5,
         order_count_at_risk=0,
         order_count_unknown=5,
     )
     res = evaluate_customer_order_impact_risk(input_obj, cfg)
-    assert res.decision.state == rules.UNKNOWN
-    assert rules.DRIVER_ALL_ORDERS_UNKNOWN in res.decision.drivers
+    assert res is None
 

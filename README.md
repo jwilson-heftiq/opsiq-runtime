@@ -727,12 +727,14 @@ curl "http://localhost:8080/v1/decision-packs/shopper_health_intelligence/1.0.0"
 
 Returns the complete pack definition including all configuration, primitives, and onboarding checks.
 
-**Check Tenant Readiness:**
+**Check Tenant Readiness (Onboarding Checks):**
 ```bash
 curl "http://localhost:8080/v1/tenants/price_chopper/readiness"
 ```
 
-Runs onboarding checks (e.g., table existence) for all enabled packs and returns a readiness checklist with PASS/FAIL/WARN status.
+Runs onboarding checks (e.g., table existence) for all enabled packs and returns a readiness checklist with PASS/FAIL/WARN status. This endpoint validates that required tables/views exist.
+
+**Note:** For comprehensive pack health monitoring including canonical freshness, decision output health, and rollup integrity, use the Pack Readiness endpoints (see Pack Readiness section below).
 
 ### Environment Configuration
 
@@ -756,4 +758,178 @@ This script scans all `pack.json` and tenant `packs.json` files and validates th
 - **Caching**: Pack definitions are cached in-memory with a 60-second TTL for performance
 - **Fail-Fast**: Invalid JSON or schema violations raise exceptions immediately
 - **Onboarding Checks**: Packs can define table/view existence checks that are validated via the readiness endpoint
+
+### Pack Readiness
+
+The OpsIQ platform provides comprehensive pack readiness monitoring to ensure decision packs are ready for production use. Readiness evaluates canonical input freshness, decision output health, and rollup integrity.
+
+#### Readiness Metrics
+
+**Canonical Freshness:**
+- Monitors the last update timestamp (`as_of_ts`) for each canonical input table required by the pack
+- Status thresholds:
+  - `PASS`: Data updated within freshness threshold (default: 36 hours)
+  - `WARN`: Data is stale (exceeds freshness threshold)
+  - `FAIL`: No data found in table
+
+**Decision Health:**
+- Evaluates decision output quality for each primitive in the pack
+- Metrics include:
+  - Total decisions in last 24 hours
+  - Decision state breakdown (AT_RISK, NOT_AT_RISK, UNKNOWN, etc.)
+  - Unknown rate (percentage of UNKNOWN decisions)
+  - Last computed timestamp
+- Status thresholds:
+  - `PASS`: Unknown rate < 30%
+  - `WARN`: Unknown rate 30-60%
+  - `FAIL`: Unknown rate > 60% or no decisions in last 24h
+
+**Rollup Integrity** (Manufacturing Pack only):
+- Validates that required JSON fields are present in `metrics_json` for aggregation
+- Checks include:
+  - `order_line_has_ordernum`: Verifies `ordernum` field in `order_line_fulfillment_risk` decisions
+  - `order_has_customer_id`: Verifies `customer_id` field in `order_fulfillment_risk` decisions
+  - `customer_has_impacted_orders`: Verifies `impacted_orders` array in `customer_order_impact_risk` decisions
+- Status thresholds:
+  - `PASS`: Pass rate ≥ 95%
+  - `WARN`: Pass rate 80-95%
+  - `FAIL`: Pass rate < 80%
+
+**Overall Status:**
+- Aggregated from all metrics using priority: `FAIL` > `WARN` > `PASS`
+- If any metric is `FAIL`, overall status is `FAIL`
+- If any metric is `WARN` (and none are `FAIL`), overall status is `WARN`
+- Otherwise, overall status is `PASS`
+
+#### Pack Readiness API Endpoints
+
+**Get Pack Readiness:**
+```bash
+curl "http://localhost:8080/v1/tenants/vmc_group/packs/order_fulfillment_risk/readiness"
+```
+
+Returns detailed readiness metrics for a specific pack:
+```json
+{
+  "tenant_id": "vmc_group",
+  "pack_id": "order_fulfillment_risk",
+  "pack_version": "1.0.0",
+  "overall_status": "PASS",
+  "canonical_freshness": [
+    {
+      "table": "gold_canonical_order_line_fulfillment_input_v1",
+      "last_as_of_ts": "2024-01-15T10:30:00Z",
+      "hours_since_last_update": 12.4,
+      "status": "PASS"
+    }
+  ],
+  "decision_health": [
+    {
+      "primitive_name": "order_line_fulfillment_risk",
+      "total_decisions": 12450,
+      "state_counts": {
+        "AT_RISK": 320,
+        "NOT_AT_RISK": 11980,
+        "UNKNOWN": 150
+      },
+      "unknown_rate": 0.012,
+      "last_computed_at": "2024-01-15T10:30:00Z",
+      "status": "PASS"
+    }
+  ],
+  "rollup_integrity": [
+    {
+      "check": "order_line_has_ordernum",
+      "pass_rate": 1.0,
+      "status": "PASS"
+    }
+  ],
+  "computed_at": "2024-01-15T22:45:00Z"
+}
+```
+
+**Get All Packs Readiness:**
+```bash
+curl "http://localhost:8080/v1/tenants/vmc_group/packs/readiness"
+```
+
+Returns readiness summary for all enabled packs for the tenant (array of pack readiness responses).
+
+#### Canonical Mapping Kit
+
+The platform includes canonical mapping specifications that serve as authoritative contracts for onboarding customers. These specifications document:
+
+- Required and recommended fields
+- Projection guidance (minimum viable vs enhanced)
+- Field fallbacks (alternative field names)
+- Unknown handling rules
+
+**Location:** `canonical_models/manufacturing/order_line_fulfillment/order_line_fulfillment_input_v1.yaml`
+
+**Example:**
+```yaml
+canonical_model: gold_canonical_order_line_fulfillment_input_v1
+version: v1
+subject_type: order_line
+grain: one row per order line release
+
+required_fields:
+  - tenant_id (string)
+  - subject_id (string)
+  - as_of_ts (timestamp)
+  - need_by_date (date)
+  - open_quantity (number)
+  - projected_available_quantity (number)
+  - order_status (string)
+
+recommended_fields:
+  - ordernum (int)
+  - customer_id (string)
+  - partnum (string)
+```
+
+#### Quality Gates
+
+The platform supports optional readiness enforcement to prevent execution of primitives when packs are in `FAIL` status.
+
+**Configuration:**
+```bash
+export OPSIQ_ENFORCE_READINESS=true
+```
+
+When enabled:
+- Runtime checks pack readiness before executing any primitive
+- If pack status is `FAIL`, execution is blocked with an error
+- Event `opsiq.pack.readiness_failed` is emitted
+- Default: `false` (enforcement disabled)
+
+**Example Error:**
+```
+RuntimeError: Pack order_fulfillment_risk v1.0.0 is in FAIL readiness status. 
+Primitive order_line_fulfillment_risk cannot be executed. 
+Check /v1/tenants/vmc_group/packs/order_fulfillment_risk/readiness for details.
+```
+
+#### Readiness UI
+
+The Next.js frontend provides a dedicated Readiness page accessible via:
+- Navigation: Admin → Readiness
+- URL: `/{tenantId}/admin/readiness`
+
+The UI displays:
+- Overall pack status badges (PASS/WARN/FAIL)
+- Expandable sections for each metric category
+- Detailed tables with timestamps and rates
+- Color-coded status indicators
+
+#### Readiness Configuration
+
+Thresholds are configurable via environment variables (with defaults):
+
+- `OPSIQ_READINESS_FRESHNESS_THRESHOLD_HOURS` (default: 36) - Hours before canonical data is considered stale
+- `OPSIQ_READINESS_UNKNOWN_RATE_WARN` (default: 0.30) - Unknown rate threshold for WARN (30%)
+- `OPSIQ_READINESS_UNKNOWN_RATE_FAIL` (default: 0.60) - Unknown rate threshold for FAIL (60%)
+- `OPSIQ_READINESS_INTEGRITY_WARN` (default: 0.95) - Integrity pass rate threshold for WARN (95%)
+- `OPSIQ_READINESS_INTEGRITY_FAIL` (default: 0.80) - Integrity pass rate threshold for FAIL (80%)
+- `OPSIQ_ENFORCE_READINESS` (default: false) - Enable quality gates to block FAIL packs
 

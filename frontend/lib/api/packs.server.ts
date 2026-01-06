@@ -4,7 +4,11 @@
  */
 
 import { cookies } from "next/headers"
-import { EnabledPackSummary, DecisionPackDefinition } from "@/types/packs"
+import {
+  EnabledPackSummary,
+  DecisionPackDefinition,
+  PackReadinessResponse,
+} from "@/types/packs"
 
 function getApiBaseUrl(): string {
   // For server-side requests in Docker, prefer OPSIQ_API_BASE_URL (can use service name)
@@ -106,6 +110,63 @@ export async function fetchPackDefinition(
     const errorText = await response.text()
     const error = new Error(
       `Failed to fetch pack definition: ${response.status} ${response.statusText}`
+    )
+    ;(error as any).status = response.status
+    ;(error as any).statusText = response.statusText
+    ;(error as any).body = errorText
+    throw error
+  }
+
+  return response.json()
+}
+
+/**
+ * Fetch pack readiness for a specific pack (server-side).
+ */
+export async function fetchPackReadiness(
+  tenantId: string,
+  packId: string
+): Promise<PackReadinessResponse> {
+  const url = new URL(
+    `${getApiBaseUrl()}/v1/tenants/${tenantId}/packs/${packId}/readiness`
+  )
+
+  const options = await buildFetchOptions()
+
+  const response = await fetch(url.toString(), options)
+
+  if (!response.ok) {
+    const errorText = await response.text()
+    const error = new Error(
+      `Failed to fetch pack readiness: ${response.status} ${response.statusText}`
+    )
+    ;(error as any).status = response.status
+    ;(error as any).statusText = response.statusText
+    ;(error as any).body = errorText
+    throw error
+  }
+
+  return response.json()
+}
+
+/**
+ * Fetch readiness for all enabled packs (server-side).
+ */
+export async function fetchAllPacksReadiness(
+  tenantId: string
+): Promise<PackReadinessResponse[]> {
+  const url = new URL(
+    `${getApiBaseUrl()}/v1/tenants/${tenantId}/packs/readiness`
+  )
+
+  const options = await buildFetchOptions()
+
+  const response = await fetch(url.toString(), options)
+
+  if (!response.ok) {
+    const errorText = await response.text()
+    const error = new Error(
+      `Failed to fetch packs readiness: ${response.status} ${response.statusText}`
     )
     ;(error as any).status = response.status
     ;(error as any).statusText = response.statusText

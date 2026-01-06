@@ -58,3 +58,36 @@ export interface DecisionPackDefinition {
   }>
 }
 
+export interface CanonicalFreshnessResult {
+  table: string
+  last_as_of_ts: string | null // ISO timestamp
+  hours_since_last_update: number | null
+  status: "PASS" | "WARN" | "FAIL"
+}
+
+export interface DecisionHealthResult {
+  primitive_name: string
+  total_decisions: number
+  state_counts: Record<string, number>
+  unknown_rate: number
+  last_computed_at: string | null // ISO timestamp
+  status: "PASS" | "WARN" | "FAIL"
+}
+
+export interface RollupIntegrityResult {
+  check: string
+  pass_rate: number
+  status: "PASS" | "WARN" | "FAIL"
+}
+
+export interface PackReadinessResponse {
+  tenant_id: string
+  pack_id: string
+  pack_version: string
+  overall_status: "PASS" | "WARN" | "FAIL"
+  canonical_freshness: CanonicalFreshnessResult[]
+  decision_health: DecisionHealthResult[]
+  rollup_integrity: RollupIntegrityResult[]
+  computed_at: string // ISO timestamp
+}
+

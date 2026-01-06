@@ -13,6 +13,8 @@ from opsiq_runtime.app.api.models.packs import (
     TenantReadinessResponse,
 )
 from opsiq_runtime.app.api.services.pack_loader import PackLoaderService
+from opsiq_runtime.app.api.services.pack_readiness import PackReadinessService
+from opsiq_runtime.app.api.services.pack_readiness.models import PackReadinessResponse
 from opsiq_runtime.settings import Settings, get_settings
 
 router = APIRouter()
@@ -31,6 +33,14 @@ def get_databricks_client(settings: Settings = Depends(get_settings)) -> Databri
         return DatabricksSqlClient(settings, correlation_id=None)
     except Exception:
         return None
+
+
+def get_pack_readiness_service(
+    settings: Settings = Depends(get_settings),
+    db_client: DatabricksSqlClient | None = Depends(get_databricks_client),
+) -> PackReadinessService:
+    """Dependency to provide PackReadinessService."""
+    return PackReadinessService(settings, db_client)
 
 
 @router.get("/tenants/{tenant_id}/decision-packs", response_model=list[EnabledPackSummary])
@@ -228,4 +238,99 @@ def get_tenant_readiness(
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error checking readiness: {str(e)}")
+
+
+@router.get("/tenants/{tenant_id}/packs/{pack_id}/readiness", response_model=PackReadinessResponse)
+def get_pack_readiness(
+    tenant_id: str,
+    pack_id: str,
+    pack_loader: PackLoaderService = Depends(get_pack_loader_service),
+    readiness_service: PackReadinessService = Depends(get_pack_readiness_service),
+) -> PackReadinessResponse:
+    """
+    Get detailed readiness metrics for a specific pack.
+
+    Returns canonical freshness, decision health, and rollup integrity metrics.
+    """
+    try:
+        # Load tenant enablement to verify pack is enabled
+        tenant_enablement = pack_loader.get_tenant_enablement(tenant_id)
+
+        # Find the pack in enabled packs
+        pack_item = None
+        for item in tenant_enablement["enabled_packs"]:
+            if item["pack_id"] == pack_id and item["enabled"]:
+                pack_item = item
+                break
+
+        if not pack_item:
+            raise HTTPException(
+                status_code=404, detail=f"Pack {pack_id} not found or not enabled for tenant {tenant_id}"
+            )
+
+        pack_version = pack_item["pack_version"]
+
+        # Load pack definition
+        pack_def = pack_loader.get_pack_definition(pack_id, pack_version)
+
+        # Calculate readiness
+        return readiness_service.calculate_pack_readiness(
+            tenant_id=tenant_id,
+            pack_id=pack_id,
+            pack_version=pack_version,
+            pack_definition=pack_def,
+        )
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error calculating pack readiness: {str(e)}")
+
+
+@router.get("/tenants/{tenant_id}/packs/readiness", response_model=list[PackReadinessResponse])
+def get_all_packs_readiness(
+    tenant_id: str,
+    pack_loader: PackLoaderService = Depends(get_pack_loader_service),
+    readiness_service: PackReadinessService = Depends(get_pack_readiness_service),
+) -> list[PackReadinessResponse]:
+    """
+    Get readiness summary for all enabled packs for a tenant.
+
+    Returns readiness metrics for each enabled pack.
+    """
+    try:
+        # Load tenant enablement
+        tenant_enablement = pack_loader.get_tenant_enablement(tenant_id)
+
+        readiness_results = []
+
+        for pack_item in tenant_enablement["enabled_packs"]:
+            if not pack_item["enabled"]:
+                continue
+
+            pack_id = pack_item["pack_id"]
+            pack_version = pack_item["pack_version"]
+
+            # Load pack definition
+            pack_def = pack_loader.get_pack_definition(pack_id, pack_version)
+
+            # Calculate readiness
+            readiness = readiness_service.calculate_pack_readiness(
+                tenant_id=tenant_id,
+                pack_id=pack_id,
+                pack_version=pack_version,
+                pack_definition=pack_def,
+            )
+            readiness_results.append(readiness)
+
+        return readiness_results
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error calculating packs readiness: {str(e)}")
 

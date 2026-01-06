@@ -1,0 +1,52 @@
+---
+canonical_model: gold_canonical_order_line_fulfillment_input_v1
+version: v1
+subject_type: order_line
+grain: one row per order line release
+description: Canonical input for evaluating order line fulfillment risk by need-by date
+
+required_fields:
+  - tenant_id (string)
+  - subject_id (string)
+  - as_of_ts (timestamp)
+  - need_by_date (date)
+  - open_quantity (number)
+  - projected_available_quantity (number)
+  - order_status (string)
+
+recommended_fields:
+  - ordernum (int)
+  - orderline (int)
+  - orderrelnum (int)
+  - customer_id (string)
+  - partnum (string)
+  - plant (string)
+  - warehouse (string)
+
+projection_guidance:
+  minimum_viable_projection:
+    description: >
+      Projected availability may be approximated using on-hand minus known shortages.
+    acceptable_logic:
+      - projected_available_quantity = max(open_quantity - release_shortage_qty, 0)
+  enhanced_projection:
+    description: >
+      Projection may incorporate future supply, allocations, and job completions.
+    examples:
+      - MRP-derived on-hand by EOD need-by
+      - supply_qty - demand_qty cumulative curves
+
+fallbacks:
+  need_by_date:
+    - needbydate
+    - promisedate
+    - reqdate
+
+unknown_handling:
+  - If required fields are null, decision state MUST be UNKNOWN
+  - UNKNOWN rates > threshold indicate mapping gaps
+
+notes:
+  - OpsIQ does not mandate how projections are computed
+  - OpsIQ evaluates decisions only from canonical outputs
+

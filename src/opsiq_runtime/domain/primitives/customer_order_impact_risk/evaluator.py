@@ -25,11 +25,14 @@ class CustomerImpactResult:
 
 def evaluate_customer_order_impact_risk(
     input_row: CustomerImpactInput, config: CustomerImpactConfig
-) -> CustomerImpactResult:
+) -> CustomerImpactResult | None:
     """
     Evaluate customer order impact risk by aggregating order decisions.
     
-    Rule order:
+    Under sparse emission (Model A), this function returns None when the customer
+    has no at-risk orders (order_count_at_risk == 0 or at_risk_order_subject_ids is empty).
+    
+    Rule order (for customers with at-risk orders):
     1. total == 0 => UNKNOWN (NO_ORDERS_FOUND)
     2. at_risk >= high_threshold => HIGH_IMPACT
     3. at_risk >= medium_threshold => MEDIUM_IMPACT
@@ -41,7 +44,14 @@ def evaluate_customer_order_impact_risk(
     - HIGH for HIGH_IMPACT/MEDIUM_IMPACT
     - MEDIUM for LOW_IMPACT
     - LOW for UNKNOWN
+    
+    Returns:
+        CustomerImpactResult if customer has at-risk orders, None otherwise
     """
+    # Sparse emission: skip if no at-risk orders
+    if input_row.order_count_at_risk == 0 or len(input_row.at_risk_order_subject_ids) == 0:
+        return None
+    
     # Rule 1: No orders found
     if input_row.order_count_total == 0:
         decision_state = rules.UNKNOWN

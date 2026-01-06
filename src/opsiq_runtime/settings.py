@@ -32,6 +32,8 @@ class Settings:
     databricks_use_merge: bool = True
     # Decision packs settings
     packs_base_dir: str = ""
+    # Readiness enforcement
+    enforce_readiness: bool = False
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -69,6 +71,7 @@ class Settings:
             databricks_table_prefix=os.getenv("DATABRICKS_TABLE_PREFIX", cls.databricks_table_prefix),
             databricks_use_merge=os.getenv("DATABRICKS_USE_MERGE", "true").lower() in ("true", "1", "yes"),
             packs_base_dir=packs_base_dir,
+            enforce_readiness=os.getenv("OPSIQ_ENFORCE_READINESS", "false").lower() in ("true", "1", "yes"),
         )
 
 
