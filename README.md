@@ -1,6 +1,6 @@
 # OpsIQ Runtime
 
-Decision Intelligence Runtime walking skeleton implementing decision primitives (`operational_risk`, `shopper_frequency_trend`, `shopper_health_classification`, `order_line_fulfillment_risk`, `order_fulfillment_risk`, `customer_order_impact_risk`) with hexagonal architecture (ports & adapters).
+Decision Intelligence Runtime walking skeleton implementing decision primitives (`operational_risk`, `shopper_frequency_trend`, `shopper_health_classification`, `shopper_item_affinity_score`, `shopper_weekly_ad_slate`, `shopper_coupon_offer_set`, `order_line_fulfillment_risk`, `order_fulfillment_risk`, `customer_order_impact_risk`) with hexagonal architecture (ports & adapters).
 
 ## Quick start (local)
 - Python 3.13 recommended.
@@ -53,6 +53,118 @@ curl -X POST http://localhost:8080/run/sync \
 - Observability and settings under `src/opsiq_runtime/observability/` and `src/opsiq_runtime/settings.py`.
 - FastAPI app under `src/opsiq_runtime/app/`.
 
+## Domain Modules
+
+### activation_policy
+
+A reusable, domain-only module providing deterministic policy functions for activation primitives. This module implements ADR-016 and provides shared guardrails for item identity resolution, exclusions, ordering, selection, and reason attribution.
+
+**Location:** `src/opsiq_runtime/domain/activation_policy/`
+
+**Features:**
+- **Item Identity Resolution**: Resolves `item_group_id` from `linkcode` (preferred) or `gtin` (fallback)
+- **Exclusion Policies**: Supports weekly ad overlap, recent purchase exclusions, and custom exclusion hooks
+- **Deterministic Ordering**: Stable ranking by score DESC, ad_position ASC, gtin ASC tie-breaker
+- **Selection Constraints**: Max items cap and per-category caps while preserving order
+- **Reason Attribution**: Item-level reasons and primitive-level driver aggregation
+- **Confidence Calculation**: Computes HIGH/MEDIUM/LOW confidence based on match rates
+
+**Key Models:**
+- `ActivationItem`: Core item representation with `item_group_id`, `gtin`, `linkcode`, `category`, `score`, and `metadata`
+- `PolicyConfig`: Configuration with defaults for exclusions, caps, and confidence thresholds
+- `PolicyOutcome`: Final result with selected/excluded items, match rates, drivers, and computed confidence
+- `ExclusionResult`: Result of exclusion checks with reasons
+
+**Core Functions:**
+- `resolve_item_group_id()`: Resolves item identity (linkcode > gtin priority)
+- `build_activation_item()`: Helper to create ActivationItem with resolved identity
+- `exclude_if_in_set()`: Exclusion check for weekly ad overlap
+- `exclude_if_recent_purchase()`: Exclusion check for recent purchases
+- `apply_exclusions()`: Aggregates multiple exclusion checks with reason counting
+- `stable_rank()`: Deterministic sorting by score, ad_position, gtin
+- `compute_match_rate()`: Calculates fraction of items with score > 0
+- `apply_max_items()`: Truncates to maximum items while preserving order
+- `apply_category_cap()`: Enforces per-category limits (items with `category=None` are uncapped)
+- `aggregate_drivers()`: Builds primitive-level driver list from selected/excluded items
+- `build_policy_outcome()`: Assembles PolicyOutcome with confidence calculation
+
+**Usage Pattern:**
+```python
+from opsiq_runtime.domain.activation_policy import (
+    ActivationItem,
+    PolicyConfig,
+    build_activation_item,
+    exclude_if_in_set,
+    exclude_if_recent_purchase,
+    apply_exclusions,
+    stable_rank,
+    apply_max_items,
+    apply_category_cap,
+    compute_match_rate,
+    aggregate_drivers,
+    build_policy_outcome,
+)
+
+# 1. Build candidates as ActivationItems
+candidates = [
+    build_activation_item(
+        linkcode="LINK001",
+        gtin="1234567890123",
+        category="Dairy",
+        score=0.9,
+        metadata={"promo_price": 10.0, "title": "Milk"}
+    ),
+]
+
+# 2. Apply exclusions
+exclusion_checks = [
+    lambda item: exclude_if_in_set(item, weekly_ad_overlap, "WEEKLY_AD_OVERLAP_EXCLUSION"),
+    lambda item: exclude_if_recent_purchase(item, recent_purchases),
+]
+eligible, excluded, reason_counts = apply_exclusions(candidates, exclusion_checks)
+
+# 3. Stable rank and apply constraints
+ranked = stable_rank(eligible)
+config = PolicyConfig(max_items=5, category_cap=2)
+final_selected = apply_max_items(
+    apply_category_cap(ranked, config.category_cap or 999),
+    config.max_items
+)
+
+# 4. Build outcome
+match_rate = compute_match_rate(final_selected)
+drivers = aggregate_drivers(final_selected, excluded)
+outcome = build_policy_outcome(
+    selected_items=final_selected,
+    excluded_items=excluded,
+    candidates_count=len(candidates),
+    match_rate=match_rate,
+    drivers=drivers,
+    config=config,
+)
+```
+
+**Design Principles:**
+- **Domain-Only**: No infrastructure imports (Databricks, boto3, FastAPI, etc.)
+- **Pure Functions**: All functions are stateless with no I/O or side effects
+- **Deterministic**: Same inputs always produce same outputs
+- **Immutable**: All models use frozen dataclasses
+- **Type-Safe**: Full Python 3.13+ type annotations
+
+**Used By:**
+- `shopper_weekly_ad_slate` primitive (can be refactored to use this module)
+- `shopper_coupon_offer_set` primitive
+- Any future activation primitives requiring policy guardrails
+
+**Testing:**
+Comprehensive unit test coverage in `tests/unit/activation_policy/` with 72+ tests covering:
+- Identity resolution (linkcode precedence, gtin fallback, null handling)
+- Exclusion logic (single/multiple exclusions, reason counting)
+- Ordering (score sorting, tie-breakers, stability)
+- Selection (max_items truncation, category caps, None category handling)
+- Reason attribution (reason accumulation, driver aggregation)
+- Confidence calculation (all confidence level rules)
+
 ## Environment
 See `.env.example` for defaults such as log level and output directory.
 
@@ -90,6 +202,11 @@ The Databricks adapters expect the following tables:
 - `{prefix}gold_canonical_shopper_frequency_input_v1` (for `shopper_frequency_trend` primitive)
   - Columns: `tenant_id`, `subject_type`, `subject_id`, `as_of_ts`, `last_trip_ts`, `prev_trip_ts`, `recent_gap_days`, `baseline_avg_gap_days`, `baseline_trip_count`, `baseline_window_days`, `config_version`
 
+- `{prefix}gold_feature_shopper_top_affinity_v1` (for `shopper_item_affinity_score` primitive)
+  - Location: Catalog `opsiq_dev`, Schema `gold`
+  - Columns: `tenant_id`, `subject_type`, `subject_id`, `as_of_ts`, `top_affinity_items` (array<struct<...>>), `lookback_days` (optional), `top_k` (optional), `config_version`
+  - Note: `top_affinity_items` is an array of structs containing item affinity data (rank, item_group_id, affinity_score, trip_count, days_since_last_purchase, total_sales, gtin_sample, linkcode_sample, category, brand, item_name, image_url)
+
 - `{prefix}gold_decision_output_v1` (for `shopper_health_classification` primitive - composite primitive that reads from this table)
   - This primitive reads decision outputs from `operational_risk` and `shopper_frequency_trend` primitives stored in this table
   - Filters by `tenant_id`, `subject_type='shopper'`, and `primitive_name IN ('operational_risk','shopper_frequency_trend')`
@@ -98,6 +215,21 @@ The Databricks adapters expect the following tables:
   - Location: Catalog `opsiq_dev`, Schema `gold`
   - Columns: `tenant_id`, `subject_type`, `subject_id`, `as_of_ts`, `need_by_date`, `open_quantity`, `projected_available_quantity`, `order_status`, `is_on_hold`, `release_shortage_qty`, `plant_shortage_qty`, `projected_onhand_qty_eod`, `supply_qty`, `demand_qty`, `partnum`, `customer_id`, `ordernum`, `plant`, `warehouse`, `config_version`, `canonical_version`
   - Note: `ordernum` and `customer_id` are required for aggregation primitives (`order_fulfillment_risk`, `customer_order_impact_risk`)
+
+- `opsiq_dev.gold.gold_canonical_weekly_ad_item_v1` (for `shopper_weekly_ad_slate` primitive)
+  - Location: Catalog `opsiq_dev`, Schema `gold`
+  - Columns: `tenant_id`, `ad_id`, `ad_group_id`, `scope_type`, `scope_value`, `as_of_ts`, `gtin`, `linkcode`, `item_group_id`, `title`, `promo_text`, `primary_image_url`, `promo_price`, `ad_price_raw`, `ad_price_uom`, `ad_price_qualifier`
+  - Note: This table contains ad candidate items that are the same for all shoppers for a given (ad_id, scope_type, scope_value)
+
+- `opsiq_dev.gold.gold_canonical_trip_item_enriched_v1` (for `shopper_weekly_ad_slate` and `shopper_coupon_offer_set` primitives)
+  - Location: Catalog `opsiq_dev`, Schema `gold`
+  - Columns: `tenant_id`, `shopper_id`, `trip_ts`, `gtin`, `linkcode`, `category`, `unit_price`, `amount`, `quantity`, and other trip item fields
+  - Note: Used to exclude recently purchased items and fetch baseline pricing for coupon offers
+
+- `opsiq_dev.gold.gold_policy_item_eligibility_v1` (for `shopper_coupon_offer_set` primitive)
+  - Location: Catalog `opsiq_dev`, Schema `gold`
+  - Columns: `tenant_id`, `as_of_ts`, `gtin`, `linkcode`, `item_group_id`, `is_coupon_eligible`, `ineligible_reasons`, and product attributes
+  - Note: Continuity eligibility table used as eligibility gate for coupon offers
 
 - `{prefix}gold_decision_output_v1` (for `order_fulfillment_risk` and `customer_order_impact_risk` primitives - composite primitives that read from this table)
   - These primitives read decision outputs from lower-level primitives stored in this table
@@ -130,11 +262,20 @@ uvicorn opsiq_runtime.app.main:app --host 0.0.0.0 --port 8080
 python -m opsiq_runtime.app.cli run --tenant price_chopper --primitive operational_risk --config cfg_v1
 ```
 
-**For `order_line_fulfillment_risk` primitive, set catalog and schema:**
+**For `order_line_fulfillment_risk`, `shopper_item_affinity_score`, and `shopper_weekly_ad_slate` primitives, set catalog and schema:**
 ```bash
 export DATABRICKS_CATALOG=opsiq_dev
 export DATABRICKS_SCHEMA=gold
 python -m opsiq_runtime.app.cli run --tenant vmc_group --primitive order_line_fulfillment_risk --config cfg_v1
+
+# Or for shopper_item_affinity_score:
+python -m opsiq_runtime.app.cli run --tenant price_chopper --primitive shopper_item_affinity_score --config cfg_v1
+
+# Or for shopper_weekly_ad_slate:
+python -m opsiq_runtime.app.cli run --tenant price_chopper --primitive shopper_weekly_ad_slate --config cfg_v1
+
+# Or for shopper_coupon_offer_set:
+python -m opsiq_runtime.app.cli run --tenant price_chopper --primitive shopper_coupon_offer_set --config cfg_v1
 ```
 
 ### API Request Reference
@@ -144,7 +285,7 @@ The `/run` endpoint accepts a JSON payload with the following fields:
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `tenant_id` | string | **Yes** | Identifies the tenant/customer. Used to filter input data and partition output data. Example: `"price_chopper"` |
-| `primitive_name` | string | **Yes** | The decision primitive to execute. Supported: `"operational_risk"`, `"shopper_frequency_trend"`, `"shopper_health_classification"`, `"order_line_fulfillment_risk"`, `"order_fulfillment_risk"`, `"customer_order_impact_risk"` |
+| `primitive_name` | string | **Yes** | The decision primitive to execute. Supported: `"operational_risk"`, `"shopper_frequency_trend"`, `"shopper_health_classification"`, `"shopper_item_affinity_score"`, `"shopper_weekly_ad_slate"`, `"shopper_coupon_offer_set"`, `"order_line_fulfillment_risk"`, `"order_fulfillment_risk"`, `"customer_order_impact_risk"` |
 | `config_version` | string | **Yes** | Version of the configuration to use. Determines thresholds and rules. Example: `"cfg_v1"` |
 | `as_of_ts` | string (ISO 8601) | No | The point-in-time for evaluation. Defaults to current time if omitted. See details below. |
 | `correlation_id` | string | No | Unique identifier for this run, used for tracing and idempotency. Auto-generated if omitted. |
@@ -451,6 +592,435 @@ curl -X POST http://localhost:8080/run \
   "duration_ms": 45230
 }
 ```
+
+### shopper_item_affinity_score
+
+Evaluates shopper item affinity by computing top affinity items based on purchase history and item preferences.
+
+**Decision States:**
+- `COMPUTED`: Top affinity items successfully computed and available
+- `UNKNOWN`: No affinity items found (empty or null `top_affinity_items`)
+
+**Configuration:**
+- `lookback_days` (default: 90): Number of days to look back for affinity computation
+- `top_k` (default: 50): Maximum number of top items to return
+
+**Input Table:** `gold_feature_shopper_top_affinity_v1`
+
+**Table Location:** Catalog `opsiq_dev`, Schema `gold`
+
+**Evaluation Logic:**
+1. If `top_affinity_items` is empty or null → `UNKNOWN` (confidence: LOW, driver: `["NO_AFFINITY_ITEMS"]`)
+2. Otherwise → `COMPUTED` (confidence: HIGH, driver: `["TOP_AFFINITY_COMPUTED"]`)
+
+**Metrics:**
+The `metrics_json` field contains:
+- `lookback_days`: Number of days used for affinity computation (from input row or config default)
+- `top_k`: Maximum number of items returned (from input row or config default)
+- `as_of_ts`: Timestamp of the affinity computation (ISO format)
+- `top_items`: Array of top affinity items, each containing:
+  - `rank`: Item rank (int, 1-based)
+  - `item_group_id`: Item group identifier (string)
+  - `affinity_score`: Affinity score (float)
+  - `trip_count`: Number of trips where item was purchased (int)
+  - `days_since_last_purchase`: Days since last purchase (int)
+  - `total_sales`: Total sales amount for this item (float)
+  - `gtin_sample`: Sample GTIN code (string, nullable)
+  - `linkcode_sample`: Sample linkcode (string, nullable)
+  - `category`: Item category (string, nullable)
+  - `brand`: Item brand (string, nullable)
+  - `item_name`: Item name (string, nullable)
+  - `image_url`: Item image URL (string, nullable)
+
+**Evidence:**
+- Evidence ID format: `evidence-<shopper_id>-affinity-v1`
+- Evidence references include:
+  - `source_table`: Source table name (`opsiq_dev.gold.gold_feature_shopper_top_affinity_v1`)
+  - `source_as_of_ts`: Timestamp of the source data (ISO format)
+
+**Example:**
+```bash
+python -m opsiq_runtime.app.cli run --tenant price_chopper --primitive shopper_item_affinity_score --config cfg_v1
+```
+
+**Example API Request:**
+```bash
+curl -X POST http://localhost:8080/run \
+  -H "Content-Type: application/json" \
+  -d '{
+    "tenant_id": "price_chopper",
+    "primitive_name": "shopper_item_affinity_score",
+    "config_version": "cfg_v1",
+    "as_of_ts": "2024-01-01T00:00:00Z",
+    "correlation_id": "abc-123"
+  }'
+```
+
+**Example Response:**
+```json
+{
+  "tenant_id": "price_chopper",
+  "primitive_name": "shopper_item_affinity_score",
+  "primitive_version": "1.0.0",
+  "config_version": "cfg_v1",
+  "count": 774470,
+  "state_counts": {
+    "COMPUTED": 750000,
+    "UNKNOWN": 24470
+  },
+  "duration_ms": 38200
+}
+```
+
+**Example Decision Output (`metrics_json`):**
+```json
+{
+  "lookback_days": 90,
+  "top_k": 50,
+  "as_of_ts": "2024-01-01T12:00:00Z",
+  "top_items": [
+    {
+      "rank": 1,
+      "item_group_id": "item_001",
+      "affinity_score": 0.95,
+      "trip_count": 10,
+      "days_since_last_purchase": 5,
+      "total_sales": 150.0,
+      "gtin_sample": "1234567890123",
+      "linkcode_sample": "LINK001",
+      "category": "Dairy",
+      "brand": "Brand A",
+      "item_name": "Milk",
+      "image_url": "https://example.com/milk.jpg"
+    },
+    {
+      "rank": 2,
+      "item_group_id": "item_002",
+      "affinity_score": 0.85,
+      "trip_count": 8,
+      "days_since_last_purchase": 3,
+      "total_sales": 120.50,
+      "gtin_sample": "9876543210987",
+      "linkcode_sample": "LINK002",
+      "category": "Produce",
+      "brand": "Brand B",
+      "item_name": "Apples",
+      "image_url": "https://example.com/apples.jpg"
+    }
+  ]
+}
+```
+
+**Note:** For this primitive, set `DATABRICKS_CATALOG=opsiq_dev` and `DATABRICKS_SCHEMA=gold` environment variables to access the feature table.
+
+### shopper_weekly_ad_slate
+
+A composite primitive that produces a ranked, personalized list of ad items per shopper by combining ad candidates, affinity scores, and purchase exclusions.
+
+**Decision States:**
+- `COMPUTED`: Slate successfully computed with one or more items
+- `UNKNOWN`: No eligible ad items after applying exclusions (only emitted if `sparse_emission=false`)
+
+**Configuration:**
+- `slate_size_k` (default: 20): Maximum number of items in the slate
+- `affinity_top_k` (default: 50): Number of top affinity items to consider for scoring
+- `exclude_lookback_days` (default: 14): Days to look back for recent purchase exclusions
+- `exclude_by` (default: "item_group_id"): Field to use for exclusions ("item_group_id" or "gtin")
+- `category_cap` (default: None): Maximum items per category (optional)
+- `min_match_rate_for_high_confidence` (default: 0.50): Minimum match rate (items with affinity > 0) for HIGH confidence
+- `sparse_emission` (default: True): If True, only emit shoppers with non-empty slates
+- `ad_id` (required): Ad identifier to filter candidates
+- `scope_type` (required): Scope type (e.g., "store", "region")
+- `scope_value` (required): Scope value (e.g., "store_123")
+- `hours_window` (default: 36): Hours window for ad candidates and affinity freshness
+
+**Input Tables:**
+- `opsiq_dev.gold.gold_canonical_weekly_ad_item_v1`: Ad candidate items (same for all shoppers)
+- `opsiq_dev.gold.gold_feature_shopper_top_affinity_v1`: Shopper affinity scores (per shopper)
+- `opsiq_dev.gold.gold_canonical_trip_item_enriched_v1`: Recent purchase history for exclusions (per shopper)
+
+**Table Location:** Catalog `opsiq_dev`, Schema `gold`
+
+**Evaluation Logic:**
+1. Fetch ad candidates filtered by `ad_id`, `scope_type`, `scope_value`
+2. For each shopper:
+   - Build affinity score map from `top_affinity_items`
+   - Score each candidate: affinity score if matched, 0.0 otherwise
+   - Exclude candidates that match recent purchase keys (within `exclude_lookback_days`)
+   - Sort remaining candidates by: score DESC, promo_price ASC NULLS LAST, gtin ASC
+   - Apply category cap if enabled (keep at most N per category)
+   - Select top `slate_size_k` items
+3. If slate is empty and `sparse_emission=True`: return None (skip output)
+4. Compute confidence: HIGH if match_rate >= `min_match_rate_for_high_confidence`, else MEDIUM
+
+**Metrics:**
+The `metrics_json` field contains:
+- `ad_id`: Ad identifier
+- `scope_type`: Scope type
+- `scope_value`: Scope value
+- `slate_size_k`: Maximum slate size
+- `exclude_lookback_days`: Days for exclusion lookback
+- `excluded_count`: Number of candidates excluded due to recent purchases
+- `candidates_count`: Total number of ad candidates
+- `match_rate`: Fraction of slate items with affinity score > 0
+- `items`: Array of slate items, each containing:
+  - `rank`: Item rank (int, 1-based)
+  - `item_group_id`: Item group identifier (string)
+  - `gtin`: GTIN code (string, nullable)
+  - `linkcode`: Linkcode (string, nullable)
+  - `score`: Affinity score (float)
+  - `title`: Item title (string, nullable)
+  - `promo_price`: Promotional price (float, nullable)
+  - `ad_group_id`: Ad group identifier (string)
+  - `reasons`: Array of reason codes (e.g., `["IN_CURRENT_AD", "AFFINITY_MATCH"]`)
+
+**Evidence:**
+- Evidence ID format: `evidence-<shopper_id>-weekly-ad-slate-v1`
+- Evidence references include:
+  - `sources`: Source table names for ad candidates, affinity, and purchases
+  - `as_of`: Timestamps for ad candidates and affinity data
+
+**Drivers:**
+- `IN_CURRENT_AD`: Item is in the current ad (always present)
+- `AFFINITY_MATCH`: Item has a matching affinity score > 0
+- `RECENT_PURCHASE_EXCLUSIONS`: Some items were excluded due to recent purchases
+- `NO_ELIGIBLE_AD_ITEMS`: No eligible items after exclusions (only if `sparse_emission=false`)
+
+**Example:**
+```bash
+export DATABRICKS_CATALOG=opsiq_dev
+export DATABRICKS_SCHEMA=gold
+python -m opsiq_runtime.app.cli run --tenant price_chopper --primitive shopper_weekly_ad_slate --config cfg_v1
+```
+
+**Example API Request:**
+```bash
+curl -X POST http://localhost:8080/run \
+  -H "Content-Type: application/json" \
+  -d '{
+    "tenant_id": "price_chopper",
+    "primitive_name": "shopper_weekly_ad_slate",
+    "config_version": "cfg_v1",
+    "as_of_ts": "2024-01-01T00:00:00Z",
+    "correlation_id": "abc-123"
+  }'
+```
+
+**Example Response:**
+```json
+{
+  "tenant_id": "price_chopper",
+  "primitive_name": "shopper_weekly_ad_slate",
+  "primitive_version": "1.0.0",
+  "config_version": "cfg_v1",
+  "count": 450000,
+  "evaluated_count": 500000,
+  "state_counts": {
+    "COMPUTED": 450000
+  },
+  "duration_ms": 125000
+}
+```
+
+**Example Decision Output (`metrics_json`):**
+```json
+{
+  "ad_id": "ad_001",
+  "scope_type": "store",
+  "scope_value": "store_123",
+  "slate_size_k": 20,
+  "exclude_lookback_days": 14,
+  "excluded_count": 5,
+  "candidates_count": 100,
+  "match_rate": 0.75,
+  "items": [
+    {
+      "rank": 1,
+      "item_group_id": "item_001",
+      "gtin": "1234567890123",
+      "linkcode": "LINK001",
+      "score": 0.9,
+      "title": "Organic Milk",
+      "promo_price": 4.99,
+      "ad_group_id": "ad_group_1",
+      "reasons": ["IN_CURRENT_AD", "AFFINITY_MATCH"]
+    },
+    {
+      "rank": 2,
+      "item_group_id": "item_002",
+      "gtin": "9876543210987",
+      "linkcode": null,
+      "score": 0.8,
+      "title": "Fresh Bread",
+      "promo_price": 3.49,
+      "ad_group_id": "ad_group_1",
+      "reasons": ["IN_CURRENT_AD", "AFFINITY_MATCH"]
+    }
+  ]
+}
+```
+
+**Note:** This primitive uses sparse emission by default. Shoppers with no eligible items after exclusions are not emitted. The `evaluated_count` in the response summary indicates the total number of shoppers evaluated, while `count` indicates the number of shoppers with non-empty slates.
+
+### shopper_coupon_offer_set
+
+A retail activation primitive that generates up to 10 personalized coupon offers per shopper by combining affinity scores, eligibility policies, exclusions, and baseline pricing with discount calculation.
+
+**Decision States:**
+- `COMPUTED`: Coupon offers successfully generated (one or more offers)
+- `UNKNOWN`: No eligible offers generated (only emitted if `sparse_emission=false`)
+
+**Configuration:**
+- `max_offers` (default: 10): Maximum number of coupon offers per shopper
+- `discount_pct` (default: 25): Discount percentage (offer_price = baseline_price * (1 - discount_pct/100))
+- `affinity_top_k` (default: 50): Number of top affinity items to consider
+- `exclude_lookback_days` (default: 14): Days to look back for recent purchase exclusions
+- `min_match_rate_for_high_confidence` (default: 0.50): Minimum match rate (items with affinity > 0) for HIGH confidence
+- `sparse_emission` (default: True): If True, only emit shoppers with non-empty offer sets
+- `ad_hours_window` (default: 72): Hours window for weekly ad exclusion set freshness
+- `pricing_fallback_mode` (default: "skip"): Behavior when baseline_price is missing ("skip" to exclude item)
+- `category_cap` (default: None): Optional maximum items per category
+- `ad_id` (required): Ad identifier for weekly ad exclusion
+- `scope_type` (required): Scope type (e.g., "store", "region")
+- `scope_value` (required): Scope value (e.g., "store_123")
+- `hours_window` (default: 72): Hours window for affinity and eligibility freshness
+
+**Input Tables:**
+- `opsiq_dev.gold.gold_feature_shopper_top_affinity_v1`: Shopper affinity scores (primary iteration set)
+- `opsiq_dev.gold.gold_policy_item_eligibility_v1`: Item eligibility gate (is_coupon_eligible=true)
+- `opsiq_dev.gold.gold_canonical_weekly_ad_item_v1`: Weekly ad items for exclusion (overlap by item_group_id)
+- `opsiq_dev.gold.gold_canonical_trip_item_enriched_v1`: Recent purchases for exclusion and baseline pricing
+
+**Table Location:** Catalog `opsiq_dev`, Schema `gold`
+
+**Evaluation Logic:**
+1. Build affinity map from `top_affinity_items` up to `affinity_top_k` (ordered by score DESC)
+2. Apply eligibility gate: filter to items in `gold_policy_item_eligibility_v1` where `is_coupon_eligible=true`
+3. Build ActivationItems for eligible candidates with pricing metadata
+4. Apply exclusions using Activation Policy module:
+   - Exclude items overlapping weekly ad (by item_group_id)
+   - Exclude recently purchased items (within `exclude_lookback_days`)
+5. Filter out items missing baseline_price (if `pricing_fallback_mode="skip"`)
+6. Calculate offer_price = round(baseline_price * (1 - discount_pct/100), 2)
+7. Apply Activation Policy utilities:
+   - Stable rank (deterministic ordering)
+   - Category cap (if configured)
+   - Max items constraint (`max_offers`)
+   - Compute match_rate and aggregate drivers
+8. Build CouponOfferSetResult with DecisionResult and EvidenceSet
+9. **Sparse emission**: return None if offers list is empty (if `sparse_emission=True`)
+
+**Metrics:**
+The `metrics_json` field contains:
+- `max_offers`: Maximum number of offers (int)
+- `discount_pct`: Discount percentage applied (int)
+- `candidate_count`: Total number of affinity candidate items (int)
+- `eligible_count`: Number of items passing eligibility gate (int)
+- `excluded_weekly_ad_count`: Number excluded due to weekly ad overlap (int)
+- `excluded_recent_purchase_count`: Number excluded due to recent purchases (int)
+- `excluded_pricing_missing_count`: Number excluded due to missing baseline_price (int)
+- `offers`: Array of coupon offers, each containing:
+  - `rank`: Offer rank (int, 1-based)
+  - `item_group_id`: Item group identifier (string)
+  - `gtin`: GTIN code (string, nullable)
+  - `linkcode`: Linkcode (string, nullable)
+  - `affinity_score`: Affinity score (float)
+  - `baseline_price`: Baseline unit price (float)
+  - `offer_price`: Calculated offer price (float, baseline_price * 0.75)
+  - `reasons`: Array of reason codes (e.g., `["HIGH_AFFINITY", "NOT_IN_WEEKLY_AD", "COUPON_DISCOUNT_APPLIED"]`)
+
+**Evidence:**
+- Evidence ID format: `evidence-<shopper_id>-coupon-offer-set-v1`
+- Evidence references include:
+  - `sources`: Source table names for affinity, eligibility, weekly ad, and purchases
+  - `context`: Ad context (ad_id, scope_type, scope_value)
+  - `as_of`: Timestamps for affinity and eligibility data
+
+**Drivers:**
+- `ACTIVATION_POLICY_APPLIED`: Activation Policy module applied (always present)
+- `ELIGIBILITY_POLICY_ENFORCED`: Eligibility gate enforced
+- `NOT_IN_WEEKLY_AD`: Items not overlapping weekly ad
+- `COUPON_DISCOUNT_APPLIED`: Discount calculation applied
+- `AFFINITY_MATCH`: Items have affinity score > 0
+- `EXCLUSIONS_APPLIED`: Some items were excluded
+
+**Confidence:**
+- `HIGH`: Match rate >= `min_match_rate_for_high_confidence` (default: 0.50)
+- `MEDIUM`: Match rate > 0 but < threshold
+- `LOW`: No items selected (should not occur with sparse emission)
+
+**Example:**
+```bash
+export DATABRICKS_CATALOG=opsiq_dev
+export DATABRICKS_SCHEMA=gold
+python -m opsiq_runtime.app.cli run --tenant price_chopper --primitive shopper_coupon_offer_set --config cfg_v1
+```
+
+**Example API Request:**
+```bash
+curl -X POST http://localhost:8080/run \
+  -H "Content-Type: application/json" \
+  -d '{
+    "tenant_id": "price_chopper",
+    "primitive_name": "shopper_coupon_offer_set",
+    "config_version": "cfg_v1",
+    "as_of_ts": "2024-01-01T00:00:00Z",
+    "correlation_id": "abc-123"
+  }'
+```
+
+**Example Response:**
+```json
+{
+  "tenant_id": "price_chopper",
+  "primitive_name": "shopper_coupon_offer_set",
+  "primitive_version": "1.0.0",
+  "config_version": "cfg_v1",
+  "count": 350000,
+  "evaluated_count": 500000,
+  "state_counts": {
+    "COMPUTED": 350000
+  },
+  "duration_ms": 145000
+}
+```
+
+**Example Decision Output (`metrics_json`):**
+```json
+{
+  "max_offers": 10,
+  "discount_pct": 25,
+  "candidate_count": 45,
+  "eligible_count": 35,
+  "excluded_weekly_ad_count": 5,
+  "excluded_recent_purchase_count": 8,
+  "excluded_pricing_missing_count": 2,
+  "offers": [
+    {
+      "rank": 1,
+      "item_group_id": "item_001",
+      "gtin": "1234567890123",
+      "linkcode": null,
+      "affinity_score": 0.9,
+      "baseline_price": 10.0,
+      "offer_price": 7.5,
+      "reasons": ["HIGH_AFFINITY", "NOT_IN_WEEKLY_AD", "COUPON_DISCOUNT_APPLIED"]
+    },
+    {
+      "rank": 2,
+      "item_group_id": "item_002",
+      "gtin": "9876543210987",
+      "linkcode": "LINK002",
+      "affinity_score": 0.85,
+      "baseline_price": 15.0,
+      "offer_price": 11.25,
+      "reasons": ["HIGH_AFFINITY", "NOT_IN_WEEKLY_AD", "COUPON_DISCOUNT_APPLIED"]
+    }
+  ]
+}
+```
+
+**Note:** This primitive uses sparse emission by default. Shoppers with no eligible offers after exclusions and pricing checks are not emitted. The `evaluated_count` in the response summary indicates the total number of shoppers evaluated, while `count` indicates the number of shoppers with non-empty offer sets. The primitive integrates with the Activation Policy module (ADR-016) for deterministic exclusions, ordering, selection, and confidence computation.
 
 ### order_line_fulfillment_risk
 

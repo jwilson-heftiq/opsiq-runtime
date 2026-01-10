@@ -9,6 +9,15 @@ from opsiq_runtime.domain.primitives.order_fulfillment_risk.evaluator import eva
 from opsiq_runtime.domain.primitives.customer_order_impact_risk.evaluator import evaluate_customer_order_impact_risk
 from opsiq_runtime.domain.primitives.shopper_frequency_trend.evaluator import evaluate_shopper_frequency_trend
 from opsiq_runtime.domain.primitives.shopper_health_classification.evaluator import evaluate_shopper_health_classification
+from opsiq_runtime.domain.primitives.shopper_item_affinity_score.evaluator import (
+    evaluate_shopper_item_affinity_score,
+)
+from opsiq_runtime.domain.primitives.shopper_weekly_ad_slate.evaluator import (
+    evaluate_shopper_weekly_ad_slate,
+)
+from opsiq_runtime.domain.primitives.shopper_coupon_offer_set.evaluator import (
+    evaluate_shopper_coupon_offer_set,
+)
 
 EvaluatorFn = Callable[..., Any]
 
@@ -20,9 +29,12 @@ class Registry:
         self.register("operational_risk", "1.0.0", evaluate_operational_risk, "fetch_operational_risk_inputs")
         self.register("shopper_frequency_trend", "1.0.0", evaluate_shopper_frequency_trend, "fetch_shopper_frequency_inputs")
         self.register("shopper_health_classification", "1.0.0", evaluate_shopper_health_classification, "fetch_shopper_health_inputs")
+        self.register("shopper_item_affinity_score", "1.0.0", evaluate_shopper_item_affinity_score, "fetch_shopper_item_affinity_inputs")
         self.register("order_line_fulfillment_risk", "1.0.0", evaluate_order_line_fulfillment_risk, "fetch_order_line_fulfillment_inputs")
         self.register("order_fulfillment_risk", "1.0.0", evaluate_order_fulfillment_risk, "fetch_order_risk_inputs")
         self.register("customer_order_impact_risk", "1.0.0", evaluate_customer_order_impact_risk, "fetch_customer_impact_inputs")
+        self.register("shopper_weekly_ad_slate", "1.0.0", evaluate_shopper_weekly_ad_slate, "fetch_shopper_weekly_ad_slate_inputs")
+        self.register("shopper_coupon_offer_set", "1.0.0", evaluate_shopper_coupon_offer_set, "fetch_shopper_coupon_offer_set_inputs")
 
     def register(
         self, primitive_name: str, primitive_version: str, fn: EvaluatorFn, input_fetch_method: str

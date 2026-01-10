@@ -14,6 +14,18 @@ from opsiq_runtime.domain.primitives.order_fulfillment_risk.model import OrderRi
 from opsiq_runtime.domain.primitives.customer_order_impact_risk.model import CustomerImpactInput, SourceOrderRef
 from opsiq_runtime.domain.primitives.shopper_frequency_trend.model import ShopperFrequencyInput
 from opsiq_runtime.domain.primitives.shopper_health_classification.model import ShopperHealthInput
+from opsiq_runtime.domain.primitives.shopper_item_affinity_score.model import (
+    ShopperItemAffinityInput,
+)
+from opsiq_runtime.domain.primitives.shopper_weekly_ad_slate.models import (
+    AdCandidate,
+    RecentPurchaseKey,
+    ShopperAffinityRow,
+    ShopperWeeklyAdSlateInput,
+)
+from opsiq_runtime.domain.primitives.shopper_coupon_offer_set.models import (
+    CouponOfferSetInput,
+)
 from opsiq_runtime.ports.inputs_repository import InputsRepository
 from opsiq_runtime.settings import Settings, get_settings
 
@@ -1068,3 +1080,757 @@ class DatabricksInputsRepository(InputsRepository):
                 extra={"correlation_id": ctx.correlation_id.value} if ctx.correlation_id else {},
             )
             raise
+
+    def fetch_shopper_item_affinity_inputs(
+        self, ctx: RunContext
+    ) -> Iterable[ShopperItemAffinityInput]:
+        """
+        Fetch shopper item affinity inputs from Databricks table.
+
+        Filters by tenant_id (required) and optionally by as_of_ts window (default 36h lookback).
+        Returns latest row per subject_id if multiple exist.
+
+        Note: Table location is determined by DATABRICKS_CATALOG and DATABRICKS_SCHEMA
+        environment variables. For this primitive, set:
+        - DATABRICKS_CATALOG=opsiq_dev
+        - DATABRICKS_SCHEMA=gold
+        """
+        table_name = self._build_table_name_for_primitive(
+            "gold_feature_shopper_top_affinity_v1"
+        )
+        tenant_id = str(ctx.tenant_id)
+        as_of_ts = ctx.as_of_ts
+        hours_window = 36  # Default 36h lookback window
+
+        # Build SQL query
+        # Note: Table name must be string substitution (can't be parameterized)
+        # Use ? placeholder for parameters
+        sql = f"""
+        SELECT
+            tenant_id,
+            subject_type,
+            subject_id,
+            as_of_ts,
+            top_affinity_items,
+            lookback_days,
+            top_k,
+            config_version
+        FROM {table_name}
+        WHERE tenant_id = ?
+            AND as_of_ts >= CURRENT_TIMESTAMP - INTERVAL ? HOURS
+            AND (? IS NULL OR as_of_ts <= ?)
+        ORDER BY subject_id, as_of_ts DESC
+        """
+
+        logger.info(
+            f"Fetching shopper item affinity inputs from {table_name} for tenant {tenant_id}",
+            extra={"correlation_id": ctx.correlation_id.value} if ctx.correlation_id else {},
+        )
+
+        try:
+            # databricks-sql-connector uses positional parameters with ?
+            # Parameters: tenant_id, hours_window, as_of_ts (for upper bound), as_of_ts (for upper bound)
+            as_of_ts_str = as_of_ts.isoformat() if as_of_ts else None
+            rows = self.client.query(
+                sql, params=[tenant_id, hours_window, as_of_ts_str, as_of_ts_str]
+            )
+
+            # Group by subject_id and take latest as_of_ts (already sorted DESC)
+            seen_subjects = set()
+            inputs = []
+
+            for row in rows:
+                subject_id = str(row.get("subject_id", ""))
+                if subject_id in seen_subjects:
+                    continue  # Skip duplicates, taking first (latest as_of_ts)
+                seen_subjects.add(subject_id)
+
+                as_of_ts_parsed = self._parse_timestamp(row.get("as_of_ts"))
+                if as_of_ts_parsed is None:
+                    logger.warning(
+                        f"Skipping row with null as_of_ts for subject {subject_id}"
+                    )
+                    continue
+
+                # Parse top_affinity_items array column
+                # Databricks may return this as JSON string or as a Python list
+                top_affinity_items_raw = row.get("top_affinity_items")
+                top_affinity_items = None
+                if top_affinity_items_raw is not None:
+                    if isinstance(top_affinity_items_raw, str):
+                        # Try to parse as JSON string
+                        try:
+                            top_affinity_items = json.loads(top_affinity_items_raw)
+                            if not isinstance(top_affinity_items, list):
+                                top_affinity_items = None
+                        except (json.JSONDecodeError, TypeError):
+                            logger.warning(
+                                f"Failed to parse top_affinity_items JSON for subject {subject_id}"
+                            )
+                            top_affinity_items = None
+                    elif isinstance(top_affinity_items_raw, list):
+                        # Already a list, use as-is
+                        top_affinity_items = top_affinity_items_raw
+                    else:
+                        top_affinity_items = None
+
+                # Parse optional integer fields
+                lookback_days = row.get("lookback_days")
+                if lookback_days is not None:
+                    try:
+                        lookback_days = int(lookback_days)
+                    except (ValueError, TypeError):
+                        lookback_days = None
+
+                top_k = row.get("top_k")
+                if top_k is not None:
+                    try:
+                        top_k = int(top_k)
+                    except (ValueError, TypeError):
+                        top_k = None
+
+                config_version = str(row.get("config_version", ""))
+                canonical_version = "v1"
+                subject_type = str(row.get("subject_type", "shopper"))
+
+                input_obj = ShopperItemAffinityInput.new(
+                    tenant_id=str(row.get("tenant_id", tenant_id)),
+                    subject_id=subject_id,
+                    as_of_ts=as_of_ts_parsed,
+                    config_version=config_version,
+                    canonical_version=canonical_version,
+                    subject_type=subject_type,
+                    top_affinity_items=top_affinity_items,
+                    lookback_days=lookback_days,
+                    top_k=top_k,
+                )
+                inputs.append(input_obj)
+
+            logger.info(
+                f"Fetched {len(inputs)} shopper item affinity input rows for tenant {tenant_id}",
+                extra={"correlation_id": ctx.correlation_id.value} if ctx.correlation_id else {},
+            )
+            return inputs
+
+        except Exception as e:
+            logger.error(
+                f"Error fetching shopper item affinity inputs from {table_name}: {e}",
+                extra={"correlation_id": ctx.correlation_id.value} if ctx.correlation_id else {},
+            )
+            raise
+
+    def fetch_current_ad_candidates(
+        self,
+        tenant_id: str,
+        ad_id: str,
+        scope_type: str,
+        scope_value: str,
+        hours_window: int = 36,
+    ) -> list[AdCandidate]:
+        """
+        Fetch current ad candidates from gold_canonical_weekly_ad_item_v1.
+        
+        Returns list of AdCandidate objects filtered by ad_id, scope_type, scope_value.
+        """
+        # Build table name - use opsiq_dev.gold catalog/schema
+        table_name = "opsiq_dev.gold.gold_canonical_weekly_ad_item_v1"
+        
+        sql = f"""
+        SELECT
+            ad_id, ad_group_id, scope_type, scope_value, as_of_ts,
+            gtin, linkcode, item_group_id,
+            title, promo_text, primary_image_url,
+            promo_price, ad_price_raw, ad_price_uom, ad_price_qualifier
+        FROM {table_name}
+        WHERE tenant_id = ?
+            AND ad_id = ?
+            AND scope_type = ?
+            AND scope_value = ?
+            AND as_of_ts >= CURRENT_TIMESTAMP - INTERVAL ? HOURS
+        ORDER BY promo_price NULLS LAST, gtin
+        """
+        
+        logger.info(
+            f"Fetching ad candidates from {table_name} for tenant {tenant_id}, ad_id={ad_id}, scope={scope_type}={scope_value}",
+        )
+        
+        try:
+            rows = self.client.query(
+                sql, params=[tenant_id, ad_id, scope_type, scope_value, hours_window]
+            )
+            
+            candidates = []
+            for row in rows:
+                as_of_ts = self._parse_timestamp(row.get("as_of_ts"))
+                if as_of_ts is None:
+                    logger.warning("Skipping row with null as_of_ts")
+                    continue
+                
+                # Parse promo_price
+                promo_price = row.get("promo_price")
+                if promo_price is not None:
+                    try:
+                        promo_price = float(promo_price)
+                    except (ValueError, TypeError):
+                        promo_price = None
+                
+                candidate = AdCandidate(
+                    ad_id=str(row.get("ad_id", "")),
+                    ad_group_id=str(row.get("ad_group_id", "")),
+                    scope_type=str(row.get("scope_type", "")),
+                    scope_value=str(row.get("scope_value", "")),
+                    as_of_ts=as_of_ts,
+                    gtin=row.get("gtin"),
+                    linkcode=row.get("linkcode"),
+                    item_group_id=str(row.get("item_group_id", "")),
+                    title=row.get("title"),
+                    promo_text=row.get("promo_text"),
+                    primary_image_url=row.get("primary_image_url"),
+                    promo_price=promo_price,
+                    ad_price_raw=row.get("ad_price_raw"),
+                    ad_price_uom=row.get("ad_price_uom"),
+                    ad_price_qualifier=row.get("ad_price_qualifier"),
+                )
+                candidates.append(candidate)
+            
+            logger.info(f"Fetched {len(candidates)} ad candidates")
+            return candidates
+            
+        except Exception as e:
+            logger.error(f"Error fetching ad candidates from {table_name}: {e}")
+            raise
+
+    def fetch_shopper_top_affinity(
+        self,
+        tenant_id: str,
+        hours_window: int = 36,
+        shopper_ids: list[str] | None = None,
+    ) -> list[ShopperAffinityRow]:
+        """
+        Fetch shopper top affinity data from gold_feature_shopper_top_affinity_v1.
+        
+        Returns list of ShopperAffinityRow objects.
+        """
+        # Build table name - use opsiq_dev.gold catalog/schema
+        table_name = "opsiq_dev.gold.gold_feature_shopper_top_affinity_v1"
+        
+        # Build SQL with optional shopper_ids filter
+        if shopper_ids:
+            placeholders = ",".join(["?"] * len(shopper_ids))
+            sql = f"""
+            SELECT shopper_id, as_of_ts, top_affinity_items
+            FROM {table_name}
+            WHERE tenant_id = ?
+                AND as_of_ts >= CURRENT_TIMESTAMP - INTERVAL ? HOURS
+                AND shopper_id IN ({placeholders})
+            """
+            params = [tenant_id, hours_window] + shopper_ids
+        else:
+            sql = f"""
+            SELECT shopper_id, as_of_ts, top_affinity_items
+            FROM {table_name}
+            WHERE tenant_id = ?
+                AND as_of_ts >= CURRENT_TIMESTAMP - INTERVAL ? HOURS
+            """
+            params = [tenant_id, hours_window]
+        
+        logger.info(
+            f"Fetching shopper affinity from {table_name} for tenant {tenant_id}",
+        )
+        
+        try:
+            rows = self.client.query(sql, params=params)
+            
+            affinity_rows = []
+            for row in rows:
+                shopper_id = str(row.get("shopper_id", ""))
+                if not shopper_id:
+                    continue
+                
+                as_of_ts = self._parse_timestamp(row.get("as_of_ts"))
+                if as_of_ts is None:
+                    logger.warning(f"Skipping row with null as_of_ts for shopper {shopper_id}")
+                    continue
+                
+                # Parse top_affinity_items array column
+                top_affinity_items_raw = row.get("top_affinity_items")
+                top_affinity_items = []
+                if top_affinity_items_raw is not None:
+                    if isinstance(top_affinity_items_raw, str):
+                        try:
+                            top_affinity_items = json.loads(top_affinity_items_raw)
+                            if not isinstance(top_affinity_items, list):
+                                top_affinity_items = []
+                        except (json.JSONDecodeError, TypeError):
+                            logger.warning(
+                                f"Failed to parse top_affinity_items JSON for shopper {shopper_id}"
+                            )
+                            top_affinity_items = []
+                    elif isinstance(top_affinity_items_raw, list):
+                        top_affinity_items = top_affinity_items_raw
+                
+                affinity_row = ShopperAffinityRow(
+                    shopper_id=shopper_id,
+                    as_of_ts=as_of_ts,
+                    top_affinity_items=top_affinity_items,
+                )
+                affinity_rows.append(affinity_row)
+            
+            logger.info(f"Fetched {len(affinity_rows)} shopper affinity rows")
+            return affinity_rows
+            
+        except Exception as e:
+            logger.error(f"Error fetching shopper affinity from {table_name}: {e}")
+            raise
+
+    def fetch_recent_purchase_keys(
+        self,
+        tenant_id: str,
+        exclude_days: int = 14,
+        shopper_ids: list[str] | None = None,
+    ) -> dict[str, set[str]]:
+        """
+        Fetch recent purchase keys for exclusions from gold_canonical_trip_item_enriched_v1.
+        
+        Returns dict mapping shopper_id to set of item_group_ids to exclude.
+        """
+        # Build table name - use opsiq_dev.gold catalog/schema
+        table_name = "opsiq_dev.gold.gold_canonical_trip_item_enriched_v1"
+        
+        # Build SQL with optional shopper_ids filter
+        if shopper_ids:
+            placeholders = ",".join(["?"] * len(shopper_ids))
+            sql = f"""
+            SELECT
+                shopper_id,
+                COALESCE(linkcode, gtin) AS item_group_id,
+                MAX(trip_ts) AS last_purchase_ts,
+                MAX(category) AS category
+            FROM {table_name}
+            WHERE tenant_id = ?
+                AND trip_ts >= CURRENT_TIMESTAMP - INTERVAL ? DAYS
+                AND shopper_id IN ({placeholders})
+            GROUP BY shopper_id, COALESCE(linkcode, gtin)
+            """
+            params = [tenant_id, exclude_days] + shopper_ids
+        else:
+            sql = f"""
+            SELECT
+                shopper_id,
+                COALESCE(linkcode, gtin) AS item_group_id,
+                MAX(trip_ts) AS last_purchase_ts,
+                MAX(category) AS category
+            FROM {table_name}
+            WHERE tenant_id = ?
+                AND trip_ts >= CURRENT_TIMESTAMP - INTERVAL ? DAYS
+            GROUP BY shopper_id, COALESCE(linkcode, gtin)
+            """
+            params = [tenant_id, exclude_days]
+        
+        logger.info(
+            f"Fetching recent purchase keys from {table_name} for tenant {tenant_id}",
+        )
+        
+        try:
+            rows = self.client.query(sql, params=params)
+            
+            purchase_keys: dict[str, set[str]] = {}
+            for row in rows:
+                shopper_id = str(row.get("shopper_id", ""))
+                item_group_id = str(row.get("item_group_id", ""))
+                
+                if not shopper_id or not item_group_id:
+                    continue
+                
+                if shopper_id not in purchase_keys:
+                    purchase_keys[shopper_id] = set()
+                purchase_keys[shopper_id].add(item_group_id)
+            
+            logger.info(f"Fetched purchase keys for {len(purchase_keys)} shoppers")
+            return purchase_keys
+            
+        except Exception as e:
+            logger.error(f"Error fetching recent purchase keys from {table_name}: {e}")
+            raise
+
+    def fetch_shopper_weekly_ad_slate_inputs(
+        self, ctx: RunContext
+    ) -> Iterable[ShopperWeeklyAdSlateInput]:
+        """
+        Fetch shopper weekly ad slate inputs by combining ad candidates, affinity, and exclusions.
+        
+        This is the main fetch method called by the runner.
+        """
+        from opsiq_runtime.adapters.config.inline_config_provider import InlineConfigProvider
+        from opsiq_runtime.domain.primitives.shopper_weekly_ad_slate.config import (
+            ShopperWeeklyAdSlateConfig,
+        )
+        
+        # Load config to get ad_id, scope_type, scope_value
+        config_provider = InlineConfigProvider()
+        config = config_provider.get_config(
+            str(ctx.tenant_id), ctx.config_version, ctx.primitive_name
+        )
+        if not isinstance(config, ShopperWeeklyAdSlateConfig):
+            raise ValueError(f"Expected ShopperWeeklyAdSlateConfig, got {type(config)}")
+        
+        tenant_id = str(ctx.tenant_id)
+        
+        # Fetch ad candidates once (same for all shoppers)
+        candidates = self.fetch_current_ad_candidates(
+            tenant_id=tenant_id,
+            ad_id=config.ad_id,
+            scope_type=config.scope_type,
+            scope_value=config.scope_value,
+            hours_window=config.hours_window,
+        )
+        
+        # Fetch shopper affinity (primary iteration set)
+        affinity_rows = self.fetch_shopper_top_affinity(
+            tenant_id=tenant_id,
+            hours_window=config.hours_window,
+            shopper_ids=None,  # Fetch all shoppers
+        )
+        
+        # Get list of shopper IDs from affinity rows
+        shopper_ids = [row.shopper_id for row in affinity_rows]
+        
+        # Fetch recent purchase keys for all shoppers at once
+        purchase_keys_map = self.fetch_recent_purchase_keys(
+            tenant_id=tenant_id,
+            exclude_days=config.exclude_lookback_days,
+            shopper_ids=shopper_ids if shopper_ids else None,
+        )
+        
+        # Build input objects per shopper
+        inputs = []
+        for affinity_row in affinity_rows:
+            shopper_id = affinity_row.shopper_id
+            recent_purchase_keys = purchase_keys_map.get(shopper_id, set())
+            
+            input_obj = ShopperWeeklyAdSlateInput.new(
+                tenant_id=tenant_id,
+                subject_id=shopper_id,
+                as_of_ts=affinity_row.as_of_ts,
+                config_version=ctx.config_version,
+                canonical_version=config.canonical_version,
+                subject_type="shopper",
+                candidates=candidates,
+                shopper_affinity=affinity_row,
+                recent_purchase_keys=recent_purchase_keys,
+            )
+            inputs.append(input_obj)
+        
+        logger.info(
+            f"Fetched {len(inputs)} shopper weekly ad slate input rows for tenant {tenant_id}",
+            extra={"correlation_id": ctx.correlation_id.value} if ctx.correlation_id else {},
+        )
+        return inputs
+
+    def fetch_weekly_ad_item_groups(
+        self,
+        tenant_id: str,
+        ad_id: str,
+        scope_type: str,
+        scope_value: str,
+        hours_window: int = 72,
+    ) -> set[str]:
+        """
+        Fetch weekly ad item group IDs for exclusion from coupon offers.
+        
+        Returns set of item_group_ids (COALESCE(linkcode, gtin)) from weekly ad items.
+        """
+        table_name = "opsiq_dev.gold.gold_canonical_weekly_ad_item_v1"
+        
+        sql = f"""
+        SELECT DISTINCT COALESCE(linkcode, gtin) AS item_group_id
+        FROM {table_name}
+        WHERE tenant_id = ?
+            AND ad_id = ?
+            AND scope_type = ?
+            AND scope_value = ?
+            AND as_of_ts >= CURRENT_TIMESTAMP - INTERVAL ? HOURS
+            AND COALESCE(linkcode, gtin) IS NOT NULL
+        """
+        
+        logger.info(
+            f"Fetching weekly ad item groups from {table_name} for tenant {tenant_id}, ad_id={ad_id}, scope={scope_type}={scope_value}",
+        )
+        
+        try:
+            rows = self.client.query(
+                sql, params=[tenant_id, ad_id, scope_type, scope_value, hours_window]
+            )
+            
+            item_groups = set()
+            for row in rows:
+                item_group_id = row.get("item_group_id")
+                if item_group_id:
+                    item_groups.add(str(item_group_id))
+            
+            logger.info(f"Fetched {len(item_groups)} weekly ad item groups")
+            return item_groups
+            
+        except Exception as e:
+            logger.error(f"Error fetching weekly ad item groups from {table_name}: {e}")
+            raise
+
+    def fetch_coupon_eligible_items(
+        self,
+        tenant_id: str,
+        hours_window: int = 72,
+    ) -> dict[str, dict]:
+        """
+        Fetch coupon-eligible items keyed by item_group_id.
+        
+        Returns dictionary mapping item_group_id -> {gtin, linkcode, ineligible_reasons}
+        """
+        table_name = "opsiq_dev.gold.gold_policy_item_eligibility_v1"
+        
+        sql = f"""
+        SELECT gtin, linkcode, item_group_id, ineligible_reasons
+        FROM {table_name}
+        WHERE tenant_id = ?
+            AND is_coupon_eligible = true
+            AND as_of_ts >= CURRENT_TIMESTAMP - INTERVAL ? HOURS
+        """
+        
+        logger.info(
+            f"Fetching coupon eligible items from {table_name} for tenant {tenant_id}",
+        )
+        
+        try:
+            rows = self.client.query(sql, params=[tenant_id, hours_window])
+            
+            eligible_map: dict[str, dict] = {}
+            for row in rows:
+                item_group_id = row.get("item_group_id")
+                if not item_group_id:
+                    continue
+                
+                item_group_id = str(item_group_id)
+                
+                # Parse ineligible_reasons (may be JSON string or array)
+                ineligible_reasons_raw = row.get("ineligible_reasons")
+                ineligible_reasons = []
+                if ineligible_reasons_raw is not None:
+                    if isinstance(ineligible_reasons_raw, str):
+                        try:
+                            ineligible_reasons = json.loads(ineligible_reasons_raw)
+                            if not isinstance(ineligible_reasons, list):
+                                ineligible_reasons = []
+                        except (json.JSONDecodeError, TypeError):
+                            ineligible_reasons = []
+                    elif isinstance(ineligible_reasons_raw, list):
+                        ineligible_reasons = ineligible_reasons_raw
+                
+                eligible_map[item_group_id] = {
+                    "gtin": row.get("gtin"),
+                    "linkcode": row.get("linkcode"),
+                    "ineligible_reasons": ineligible_reasons,
+                }
+            
+            logger.info(f"Fetched {len(eligible_map)} coupon eligible items")
+            return eligible_map
+            
+        except Exception as e:
+            logger.error(f"Error fetching coupon eligible items from {table_name}: {e}")
+            raise
+
+    def fetch_baseline_prices(
+        self,
+        tenant_id: str,
+        exclude_days: int = 90,
+        shopper_ids: list[str] | None = None,
+    ) -> dict[tuple[str, str], float]:
+        """
+        Fetch baseline unit prices for items per shopper.
+        
+        Determines per-line unit price: if table has unit_price column use it;
+        else compute amount/quantity when quantity>0.
+        
+        Returns dictionary mapping (shopper_id, item_group_id) -> baseline_price
+        """
+        table_name = "opsiq_dev.gold.gold_canonical_trip_item_enriched_v1"
+        
+        # Build SQL with CTE for robust unit price calculation
+        if shopper_ids:
+            placeholders = ",".join(["?"] * len(shopper_ids))
+            sql = f"""
+            WITH base AS (
+                SELECT
+                    shopper_id,
+                    COALESCE(linkcode, gtin) AS item_group_id,
+                    trip_ts,
+                    CASE
+                        WHEN unit_price IS NOT NULL THEN CAST(unit_price AS DOUBLE)
+                        WHEN quantity IS NOT NULL AND quantity > 0 AND amount IS NOT NULL 
+                            THEN CAST(amount / quantity AS DOUBLE)
+                        ELSE NULL
+                    END AS unit_price_calc
+                FROM {table_name}
+                WHERE tenant_id = ?
+                    AND trip_ts >= CURRENT_TIMESTAMP - INTERVAL ? DAYS
+                    AND shopper_id IN ({placeholders})
+            ),
+            ranked AS (
+                SELECT *,
+                    ROW_NUMBER() OVER (PARTITION BY shopper_id, item_group_id ORDER BY trip_ts DESC) AS rn
+                FROM base
+                WHERE unit_price_calc IS NOT NULL
+            )
+            SELECT shopper_id, item_group_id, unit_price_calc AS baseline_price, trip_ts AS baseline_price_ts
+            FROM ranked
+            WHERE rn = 1
+            """
+            params = [tenant_id, exclude_days] + shopper_ids
+        else:
+            sql = f"""
+            WITH base AS (
+                SELECT
+                    shopper_id,
+                    COALESCE(linkcode, gtin) AS item_group_id,
+                    trip_ts,
+                    CASE
+                        WHEN unit_price IS NOT NULL THEN CAST(unit_price AS DOUBLE)
+                        WHEN quantity IS NOT NULL AND quantity > 0 AND amount IS NOT NULL 
+                            THEN CAST(amount / quantity AS DOUBLE)
+                        ELSE NULL
+                    END AS unit_price_calc
+                FROM {table_name}
+                WHERE tenant_id = ?
+                    AND trip_ts >= CURRENT_TIMESTAMP - INTERVAL ? DAYS
+            ),
+            ranked AS (
+                SELECT *,
+                    ROW_NUMBER() OVER (PARTITION BY shopper_id, item_group_id ORDER BY trip_ts DESC) AS rn
+                FROM base
+                WHERE unit_price_calc IS NOT NULL
+            )
+            SELECT shopper_id, item_group_id, unit_price_calc AS baseline_price, trip_ts AS baseline_price_ts
+            FROM ranked
+            WHERE rn = 1
+            """
+            params = [tenant_id, exclude_days]
+        
+        logger.info(
+            f"Fetching baseline prices from {table_name} for tenant {tenant_id}",
+        )
+        
+        try:
+            rows = self.client.query(sql, params=params)
+            
+            baseline_prices: dict[tuple[str, str], float] = {}
+            for row in rows:
+                shopper_id = row.get("shopper_id")
+                item_group_id = row.get("item_group_id")
+                baseline_price = row.get("baseline_price")
+                
+                if not shopper_id or not item_group_id or baseline_price is None:
+                    continue
+                
+                try:
+                    price_float = float(baseline_price)
+                    if price_float > 0:  # Only include positive prices
+                        baseline_prices[(str(shopper_id), str(item_group_id))] = price_float
+                except (ValueError, TypeError):
+                    logger.warning(
+                        f"Invalid baseline_price for shopper {shopper_id}, item {item_group_id}: {baseline_price}"
+                    )
+                    continue
+            
+            logger.info(f"Fetched baseline prices for {len(baseline_prices)} (shopper, item) pairs")
+            return baseline_prices
+            
+        except Exception as e:
+            logger.error(f"Error fetching baseline prices from {table_name}: {e}")
+            raise
+
+    def fetch_shopper_coupon_offer_set_inputs(
+        self, ctx: RunContext
+    ) -> Iterable[CouponOfferSetInput]:
+        """
+        Fetch shopper coupon offer set inputs by combining affinity, eligibility, exclusions, and pricing.
+        
+        This is the main fetch method called by the runner.
+        """
+        from opsiq_runtime.adapters.config.inline_config_provider import InlineConfigProvider
+        from opsiq_runtime.domain.primitives.shopper_coupon_offer_set.config import (
+            ShopperCouponOfferSetConfig,
+        )
+        
+        # Load config to get ad_id, scope_type, scope_value
+        config_provider = InlineConfigProvider()
+        config = config_provider.get_config(
+            str(ctx.tenant_id), ctx.config_version, ctx.primitive_name
+        )
+        if not isinstance(config, ShopperCouponOfferSetConfig):
+            raise ValueError(f"Expected ShopperCouponOfferSetConfig, got {type(config)}")
+        
+        tenant_id = str(ctx.tenant_id)
+        
+        # Fetch weekly_ad_item_groups once (shared for all shoppers)
+        weekly_ad_item_groups = self.fetch_weekly_ad_item_groups(
+            tenant_id=tenant_id,
+            ad_id=config.ad_id,
+            scope_type=config.scope_type,
+            scope_value=config.scope_value,
+            hours_window=config.ad_hours_window,
+        )
+        
+        # Fetch eligible_map once (shared for all shoppers)
+        eligible_map = self.fetch_coupon_eligible_items(
+            tenant_id=tenant_id,
+            hours_window=config.hours_window,
+        )
+        
+        # Fetch shopper affinity rows (defines which shoppers to evaluate)
+        affinity_rows = self.fetch_shopper_top_affinity(
+            tenant_id=tenant_id,
+            hours_window=config.hours_window,
+            shopper_ids=None,  # Fetch all shoppers
+        )
+        
+        # Extract shopper_ids list
+        shopper_ids = [row.shopper_id for row in affinity_rows]
+        
+        # Fetch recent_purchase_keys for all shoppers (batched)
+        purchase_keys_map = self.fetch_recent_purchase_keys(
+            tenant_id=tenant_id,
+            exclude_days=config.exclude_lookback_days,
+            shopper_ids=shopper_ids if shopper_ids else None,
+        )
+        
+        # Fetch baseline_prices for all shoppers (batched)
+        baseline_prices = self.fetch_baseline_prices(
+            tenant_id=tenant_id,
+            exclude_days=90,  # Use longer lookback for pricing (90 days default)
+            shopper_ids=shopper_ids if shopper_ids else None,
+        )
+        
+        # Build input objects per shopper
+        inputs = []
+        for affinity_row in affinity_rows:
+            shopper_id = affinity_row.shopper_id
+            recent_purchase_keys = purchase_keys_map.get(shopper_id, set())
+            
+            input_obj = CouponOfferSetInput.new(
+                tenant_id=tenant_id,
+                subject_id=shopper_id,
+                as_of_ts=affinity_row.as_of_ts,
+                config_version=ctx.config_version,
+                canonical_version=config.canonical_version,
+                subject_type="shopper",
+                shopper_affinity=affinity_row,
+                weekly_ad_item_groups=weekly_ad_item_groups,
+                eligible_map=eligible_map,
+                recent_purchase_keys=recent_purchase_keys,
+                baseline_prices=baseline_prices,  # Full dict passed (filtered by key in evaluator)
+            )
+            inputs.append(input_obj)
+        
+        logger.info(
+            f"Fetched {len(inputs)} shopper coupon offer set input rows for tenant {tenant_id}",
+            extra={"correlation_id": ctx.correlation_id.value} if ctx.correlation_id else {},
+        )
+        return inputs

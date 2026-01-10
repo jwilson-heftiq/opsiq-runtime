@@ -8,6 +8,9 @@ from opsiq_runtime.domain.primitives.shopper_health_classification.config import
 from opsiq_runtime.domain.primitives.order_line_fulfillment_risk.config import OrderLineFulfillmentRiskConfig
 from opsiq_runtime.domain.primitives.order_fulfillment_risk.config import OrderRiskConfig
 from opsiq_runtime.domain.primitives.customer_order_impact_risk.config import CustomerImpactConfig
+from opsiq_runtime.domain.primitives.shopper_weekly_ad_slate.config import (
+    ShopperWeeklyAdSlateConfig,
+)
 
 
 class ConfigProvider(Protocol):
@@ -20,5 +23,6 @@ class ConfigProvider(Protocol):
         OrderLineFulfillmentRiskConfig,
         OrderRiskConfig,
         CustomerImpactConfig,
+        ShopperWeeklyAdSlateConfig,
     ]: ...
 
